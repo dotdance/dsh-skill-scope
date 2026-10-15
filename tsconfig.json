@@ -1,0 +1,38 @@
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "types": ["node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    /**
+     * `@deepseek-ai/dsh-client-ui-primitives` 是 `dsh.client.external`：运行期由宿主
+     * client baseline 提供，本仓库**不安装**它（`node_modules/@deepseek-ai/` 下没有）。
+     *
+     * `moduleResolution: bundler` 因此找不到它的类型声明，`tsc --noEmit` 会对
+     * `src/client/parts.tsx` 的 import 报 TS2307。构建侧不受影响（rolldown 把它标成
+     * external，不解析），运行期也不受影响（宿主提供）。只有类型检查需要一条映射。
+     *
+     * 指向**测试替身**而不是全局 store 里那份真实实现：那份的 React 是 19.x，
+     * 与仓库钉的 18.3.1 冲突。替身只声明真实用到的成员，类型面足够。
+     * vitest 侧的同名 alias 见 `vitest.config.ts`。
+     */
+    "paths": {
+      "@deepseek-ai/dsh-client-ui-primitives": ["./tests/support/stubs/dsh-client-ui-primitives.tsx"]
+    }
+  },
+  "include": ["src", "tests", "tsdown.config.ts", "vitest.config.ts"]
+}

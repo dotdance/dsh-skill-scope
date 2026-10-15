@@ -1,0 +1,743 @@
+/*
+ * dsh-skill-scope 的全部样式。类名在构建期被 lightningcss 重写为 `[hash]_[local]`，
+ * 并以 `<style data-plugin-css="dsh-skill-scope/styles.module.css" data-plugin="dsh-skill-scope">`
+ * 注入（见 tsdown.config.ts）。因此这里**只写局部类名**，不写全局选择器，也不写 @layer。
+ *
+ * ---------------------------------------------------------------------------
+ * 主题：只引宿主 token，**不要自己写深色模式分支**
+ * ---------------------------------------------------------------------------
+ * 颜色一律用宿主主题变量 `--dsw-alias-*`。`--dsw-alias-*` 是这个主题接口的公开
+ * 名字；`data-ds-dark-theme` / `prefers-color-scheme` 在本文件里出现 **0 次**
+ * —— 主题切换由 token 自己完成，不需要手写分支。
+ *
+ * 教训（实测缺陷，已在真机上复现）：这里原先写的是 `--dsh-color-*`。
+ * 但整个宿主里**不存在 `--dsh-color-*` 这个变量族**——实测把 shell 的两份样式表
+ * （`/assets/index-*.css`、`/assets/vendor-*.css`）与整个
+ * `~/.dsh/profiles/web/node_modules` 树都 grep 过一遍，`--dsh-color-` 命中 0。
+ * 于是每个 `var(--dsh-color-x, <浅色>)` 都落到 fallback，深色主题下显示的是
+ * 硬编码浅色值（`#fff` 底 + 深色字），所以用户看到「深色模式下看不清」。
+ *
+ * 因此：**刻意不写 `@media (prefers-color-scheme: dark)`，也不写
+ * `[data-ds-dark-theme]` 覆盖**。token 自己会随主题切换取值，手写分支只会和宿主打架。
+ * fallback 只留中性值（`transparent` / `currentColor` 一类），不再留浅色硬编码。
+ *
+ * ---------------------------------------------------------------------------
+ * 版式：卡片网格（按用户给定的目标效果重做）
+ * ---------------------------------------------------------------------------
+ * 目标形状（截图）：24px 圆角面板、头部只有标题 + 右上关闭图标、说明段、
+ * 带放大镜的搜索框、可折叠分区（`技能 61 ˅`）、两列卡片、每卡右侧状态 tag +
+ * 展开箭头、展开后显示描述与「状态」明细。
+ *
+ * **布局用 `minmax(0,1fr)` 而不是 `1fr`**：`1fr` 的最小尺寸是 `auto`，卡片里的长
+ * skill 名/描述是不可断的长 token 时会把列撑破并溢出到相邻区域——用户报告的
+ * 「mcp 区域显示错乱重叠」正是这类溢出。`minmax(0,1fr)` 允许列收缩到 0 以下，
+ * 配合 `.cardName` 的 `min-width:0` 与 `word-break` 才能真正把长名字截在卡内。
+ */
+
+/**
+ * 常驻页面（全局面板）的最外层。**这是本文件唯一一条给 `main` 槽位的规则，且它是承重的。**
+ *
+ * 教训（实测缺陷，已复现）：这个类原先**根本没有定义** —— JSX 写了 `styles.panel`，
+ * CSS 里却只有 `.panelHead` / `.panelBody`（那两个是**弹窗**用的）。CSS Modules 对不存在的
+ * 键返回 `undefined`，于是 `className={undefined}`，最外层 div **没有任何样式**。
+ * 列表本可以靠内容撑高，但宿主 `main` 槽位给的是**固定高度**容器，
+ * 于是 141 张卡片被硬裁，且**没有任何滚动容器** → 用户报告「无法上下滑动，只看得到上面」。
+ *
+ * 正确契约：常驻页面**自己**声明 `height:100%` + `overflow-y:auto`，并从边框起
+ * 算盒尺寸（`box-sizing:border-box`）。不要指望宿主给滚动 —— 它只给高度。
+ *
+ * 用 `height:100%` 而非 `100vh`：侧栏是并列的 flex 兄弟，`100vh` 会比可用高度多出顶栏，
+ * 底部内容会被再裁一次（弹窗可以用 `100vh`，因为它脱离文档流）。
+ */
+.panel {
+  box-sizing: border-box;
+  height: 100%;
+  overflow-y: auto;
+  /*
+   * **用 `flex` + `gap` 而不是靠各段自带 margin**：实测（2026-10-13）本容器原为
+   * `display:block` 且无 `gap`，于是 header / 视图条 / 搜索框 / 两个 section 之间
+   * 的间距**全部是 0px**——五条横向带子直接贴在一起，这就是「页面布局拥挤」的来源。
+   * 集中用 `gap` 定节奏后，任何一段的增删都自动保持一致的呼吸感，
+   * 也不会再出现「某段忘了写 margin 就贴上去」。
+   */
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  /* 与 `main` 槽位既有的内边距对齐；底部多留 32px，最后一张卡片不贴边。 */
+  padding: 20px 24px 32px;
+}
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* 弹层必须自己接管指针事件：shell.overlay 这一层本身是 click-through 的。 */
+  pointer-events: auto;
+  background: var(--dsw-alias-bg-mask-1, rgb(0 0 0 / 45%));
+  z-index: 60;
+}
+
+.modal {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  width: min(760px, calc(100vw - 48px));
+  height: min(680px, calc(100vh - 48px));
+  max-width: calc(100vw - 48px);
+  /* `overflow:hidden` + 内部单独滚动的 body：面板本身不滚，表头与说明保持可见。 */
+  overflow: hidden;
+  border-radius: 24px;
+  background: var(--dsw-alias-bg-layer-1, Canvas);
+  color: var(--dsw-alias-label-primary, CanvasText);
+  box-shadow: 0 24px 64px rgb(0 0 0 / 32%);
+}
+
+/* 说明段与搜索框所在的上半部：固定不滚。 */
+.panelHead {
+  display: flex;
+  flex-direction: column;
+  /* 与 `.panel` 同节奏（16px）：弹层内外的横向带子间距一致，视觉上不跳。 */
+  gap: 16px;
+  padding: 24px 24px 16px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+/*
+ * 标题右侧的 `rev xxx · 刷新` 提示。
+ *
+ * **回归守卫**（`tests/client/bundle.spec.ts` 的「每个 styles.* 都有对应 CSS 类」）：
+ * 这个类曾经只被 JSX 引用、CSS 里**没有**对应规则，CSS Modules 于是把它编成
+ * `undefined`，那个 `<span>` 渲染出来没有任何类名 —— 它会丢掉次要色与小字号，
+ * 以默认正文样式与 17px 粗体标题同排，抢走标题的视觉层级。
+ * 构建、类型检查、既有断言全都不会发现这一类缺陷。
+ */
+.intro {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  /* secondary 实测 浅 5.80 / 深 10.42。tertiary 浅色只有 3.71，低于 AA 4.5。 */
+  color: var(--dsw-alias-label-secondary, currentColor);
+}
+
+/* 「非实时」警示词：用 warn 色，但字重加粗保证仍可读。 */
+.introWarn {
+  color: var(--dsw-alias-state-warn-primary, currentColor);
+  font-weight: 600;
+}
+
+/* 右上关闭：方形图标按钮，悬停给一层底。 */
+.closeButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, currentColor);
+  cursor: pointer;
+}
+
+.closeButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover, transparent);
+  color: var(--dsw-alias-label-primary, currentColor);
+}
+
+/* 放大镜在框内的搜索行。 */
+.searchRow {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.searchIcon {
+  position: absolute;
+  left: 12px;
+  display: inline-flex;
+  color: var(--dsw-alias-label-tertiary, currentColor);
+  pointer-events: none;
+}
+
+.search {
+  width: 100%;
+  padding: 9px 12px 9px 36px;
+  border: 1px solid var(--dsw-alias-border-l2, currentColor);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-3, transparent);
+  color: var(--dsw-alias-label-primary, currentColor);
+  font: inherit;
+  font-size: 13px;
+}
+
+.search::placeholder {
+  color: var(--dsw-alias-label-tertiary, currentColor);
+}
+
+.search:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, currentColor);
+  outline-offset: 1px;
+}
+
+/* 滚动体：`min-height:0` 是 flex 子项能真正滚动的前提。 */
+.panelBody {
+  flex: 1;
+  min-height: 0;
+  padding: 4px 24px 24px;
+  overflow-y: auto;
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* 分区头：标题 + 计数 + 折叠箭头（整行可点）+ 右侧批量按钮。 */
+.sectionHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.sectionToggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-primary, currentColor);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.sectionCount {
+  font-size: 13px;
+  color: var(--dsw-alias-label-secondary, currentColor);
+}
+
+.sectionChevron {
+  margin-left: auto;
+  display: inline-flex;
+  color: var(--dsw-alias-label-secondary, currentColor);
+  transition: transform 140ms ease;
+}
+
+.sectionChevronOpen {
+  transform: rotate(180deg);
+}
+
+/* **`minmax(0,1fr)` 而不是 `1fr`** —— 见文件头「版式」注。 */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  /* 行距略大于列距：两列并排时行距大一点更易横向扫读。 */
+  gap: 12px 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* ── 来源分组 ─────────────────────────────────────────────────────────────
+   分组只在 Skill 段出现（服务端给每行算好 `group` / `groupLabel`）。
+   视觉上是「次级标题 + 网格」，层级比分区头低一档：字号更小、颜色更弱、
+   左侧加一条竖直的引导线，让「这是某个分区内部的一组」一眼可辨。
+   ──────────────────────────────────────────────────────────────────────── */
+
+.groups {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* 引导线：用 `border-left` 而不是伪元素，避免在 `overflow:hidden` 的祖先里被裁掉。 */
+  padding-left: 10px;
+  border-left: 2px solid var(--dsw-alias-border-1, rgb(0 0 0 / 8%));
+  min-width: 0;
+}
+
+.groupToggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, currentColor);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.groupToggle:hover {
+  color: var(--dsw-alias-label-primary, currentColor);
+}
+
+.groupChevron {
+  display: inline-flex;
+  flex: none;
+  transition: transform 140ms ease;
+}
+
+.groupChevron[data-open='true'] {
+  transform: rotate(180deg);
+}
+
+.groupTitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.groupCount {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary, currentColor));
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 窄屏切单列，避免两列里每张卡被压到不可读。 */
+@media (max-width: 640px) {
+  .cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.card {
+  min-width: 0;
+  /* `overflow:hidden` 让圆角真正裁住子元素背景，并兜住任何残余溢出。 */
+  overflow: hidden;
+  border: 1px solid var(--dsw-alias-border-l2, currentColor);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-3, transparent);
+}
+
+.cardHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 11px 12px;
+}
+
+.cardMain {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.cardName {
+  /* 名字占据 `.cardMain` 里除开关以外的全部剩余宽度；`.switch` 是 `flex: none`。 */
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  /* 长 skill 名要能截断，否则会撑破 `minmax(0,1fr)` 的列。 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 只读卡不渲染开关；整体前景降一档但保持 AA。 */
+.cardDisabled .cardName {
+  color: var(--dsw-alias-label-secondary, currentColor);
+}
+
+.cardTail {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /*
+   * **承重**：`cardTail` 里的东西（状态 Tag、展开箭头）没有一个能换行，
+   * 所以当「很长的 skill 名字」出现时，尾巴会要求一个超过卡片宽度的宽度，
+   * 而 `cardName`（可压缩）抢不过它，于是名字被压到 0 消失；更糟的是
+   * `.card { overflow: hidden }` 直接把尾巴裁掉——视觉上就是「显示错乱/重叠」。
+   *
+   * `min-width: 0` 让尾巴也能被压，使名字在空间不足时仍有可分配宽度。
+   *
+   * `flex-shrink` 取大于 1 的值，让尾巴比名字**优先**被压：
+   * 原因是可读性排序——名字是这一行的主标识，状态 Tag 只是补充说明。
+   *
+   * 注：尾巴里只有状态 Tag 与展开箭头，不含「只读原因」文案（`Readonly` 语义
+   * 由「没有开关」承载），但上面的压缩取舍仍成立。
+   */
+  min-width: 0;
+  flex-shrink: 3;
+}
+
+/* 状态 tag：复用宿主 `Tag` 基元渲染，这里只负责展开箭头。 */
+.expandButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, currentColor);
+  cursor: pointer;
+}
+
+.expandButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover, transparent);
+}
+
+.expandChevron {
+  display: inline-flex;
+  transition: transform 140ms ease;
+}
+
+.expandChevronOpen {
+  transform: rotate(180deg);
+}
+
+/* 展开详情：与卡片头用一条分隔线隔开。 */
+.cardBody {
+  border-top: 1px solid var(--dsw-alias-border-l2, currentColor);
+  padding: 10px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--dsw-alias-label-secondary, currentColor);
+}
+
+.cardDescription {
+  margin: 0;
+  /* 描述是长文本，要能换行；`anywhere` 兜住无空格的长 token。 */
+  overflow-wrap: anywhere;
+}
+
+.detailRow {
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.detailKey {
+  flex: none;
+  width: 56px;
+  color: var(--dsw-alias-label-secondary, currentColor);
+}
+
+.detailValue {
+  min-width: 0;
+  color: var(--dsw-alias-label-primary, currentColor);
+  overflow-wrap: anywhere;
+}
+
+/*
+ * 详情行里的「来源」值：插件名或**磁盘注册根的绝对路径**。
+ *
+ * 与 `.detailValue` 分开是因为取值形状不同：路径很长（实测
+ * `/Users/go/node_modules/gbrain/skills` 有 38 字符），必须能任意位置断行，
+ * 否则在 760px 的工作区弹层里会把详情行横向撑出去。
+ *
+ * 用**等宽字体**：路径里 `l/1`、`O/0` 靠比例字体很难分辨，而用户会照着它
+ * 去文件系统里找目录。等宽也让它与插件名（普通文本）在视觉上区分开——
+ * 一眼能看出「这是一个文件系统位置」还是「这是某个插件」。
+ */
+.detailOrigin {
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-primary, currentColor);
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+/*
+ * 工具名单：MCP 卡片展开后逐条列出的完整工具名。
+ *
+ * **限高 + 卡片内滚动**（与用户确认过）：一个 server 可以有 12～20+ 个工具
+ * （实测 `gbrain` 12 个），全量展开会把这张卡片拉成整屏高，把同一段里的其他卡片
+ * 挤到视野之外。120px 约合 5 行，正好够看清「有哪些」而不撑破版式。
+ *
+ * 用 `<ul>` 且**清掉默认的 `padding-left`**：`<ul>` 自带 40px 左内边距，会让工具名
+ * 比上面的「状态」值缩进一大截，看起来像独立小节而不是同一张卡的明细行。
+ */
+.toolList {
+  min-width: 0;
+  max-height: 120px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/*
+ * 工具名用**等宽字体**：名字里 `l/1`、`O/0` 靠比例字体很难分辨，而用户会照着它
+ * 去日志或源码里查（理由与 `.detailOrigin` 同源，此处不重述）。
+ * `word-break: break-all` 兜住超长名字：`mcp__<server>__<tool>` 本身就长，
+ * 不换行会把详情行横向撑出卡片。
+ */
+.toolName {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--dsw-alias-label-primary, currentColor);
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+/* 开关：28×16 轨道、12px 滑块，和宿主控件同尺度。 */
+/*
+ * 开关（两层结构：外层 `<button>` 透明只负责命中与无障碍，
+ * 内层 `.switchTrack` 画轨道、`.switchThumb` 画滑块）。
+ *
+ * **为什么改成两层**：原先把轨道画在 `<button>` 自身、滑块用 `::after`。
+ * 那样 `border` 会参与盒模型，轨道实际内容区只有 26×14，滑块 `left:1px` 压着边框；
+ * 深色主题下边框与轨道底色都取 `border-l3`，滑块几乎看不出位移。
+ * 两层结构把「命中区域」与「视觉轨道」解耦，尺寸不再被边框吃掉。
+ *
+ * 尺寸 28×16 与滑块内缩 2px 与宿主控件的尺度一致。
+ */
+.switch {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  /* 轨道自带底色，按钮自身必须透明，否则会在圆角外露出方角。 */
+  background: transparent;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+/* 无障碍焦点环：键盘用户必须看得出焦点在哪。 */
+.switch:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary, currentColor);
+  outline-offset: 2px;
+}
+
+.switchTrack {
+  position: relative;
+  display: inline-block;
+  width: 28px;
+  height: 16px;
+  border-radius: 999px;
+  /* 关闭态用中性边框色当轨道底色——这是宿主中性色阶里可用的“灰轨道”。 */
+  background: var(--dsw-alias-border-l2, currentColor);
+  transition: background-color 120ms ease-in-out;
+}
+
+.switchOn .switchTrack {
+  background: var(--dsw-alias-state-business-primary, currentColor);
+}
+
+.switchThumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  /*
+   * 滑块用 `bg-layer-1`（浅色 #fff / 深色 #232324）而不是写死的白：
+   * 写死白色在深色主题下会与轨道糊在一起。
+   */
+  background: var(--dsw-alias-bg-layer-1, currentColor);
+  transition: transform 120ms ease-in-out;
+}
+
+.switchOn .switchThumb {
+  transform: translateX(12px);
+}
+
+.switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* 数量文字（沿用旧类名，供既有调用点过渡）。 */
+.count {
+  font-size: 13px;
+  color: var(--dsw-alias-label-secondary, currentColor);
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--dsw-alias-border-l3, currentColor);
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary, currentColor);
+  white-space: nowrap;
+}
+
+.alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-state-error-primary, currentColor);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--dsw-alias-state-error-primary, currentColor);
+}
+
+/* 模式分段：胶囊组，选中项用 brand 描边 + 淡底。 */
+.modeRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.modeButton {
+  padding: 4px 12px;
+  border: 1px solid var(--dsw-alias-border-l2, currentColor);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, currentColor);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.modeButton:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover, transparent);
+}
+
+.modeButtonActive {
+  border-color: var(--dsw-alias-brand-primary, currentColor);
+  background: var(--dsw-alias-interactive-bg-active, transparent);
+  color: var(--dsw-alias-brand-primary, currentColor);
+}
+
+.modeButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.button {
+  padding: 4px 10px;
+  border: 1px solid var(--dsw-alias-border-l2, currentColor);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, currentColor);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.button:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover, transparent);
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* 被全局关闭的名单：默认折叠的只读区。 */
+.details {
+  border: 1px solid var(--dsw-alias-border-l2, currentColor);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.detailsSummary {
+  cursor: pointer;
+  color: var(--dsw-alias-label-secondary, currentColor);
+}
+
+.detailsList {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.detailsRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.detailsName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.empty {
+  padding: 4px 2px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary, currentColor);
+}
+
+/* 输入框右侧的入口 chip。 */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border: 1px solid var(--dsw-alias-border-l2, currentColor);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, currentColor);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chip:hover {
+  background: var(--dsw-alias-interactive-bg-hover, transparent);
+}
