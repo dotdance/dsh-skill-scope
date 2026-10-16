@@ -15,7 +15,16 @@
 
 ---
 
-## 1. The problem it solves
+## Installation
+
+```sh
+dsh plugin --profile web add @dotdance/dsh-skill-scope
+```
+
+Replace `--profile web` with the name of your own profile.
+
+
+## The problem it solves
 
 The more you install in DSH, the longer the list your agent has to read every turn.
 
@@ -38,7 +47,7 @@ visible, clickable switches, managed separately at **global** and **per-workspac
 
 ---
 
-## 2. What it does
+## What it does
 
 ### 1. The global panel — switch off everything no project needs
 
@@ -83,16 +92,8 @@ The panel title states that it affects `default-workspace` only, and the lower p
       The set the model actually sees this turn
 ```
 
-### 4. Off is not deleted: manual invocation always remains
+### Off is not deleted: manual invocation always remains
 
 Switching a skill off only disables its **automatic invocation by the model**. You can still call it by typing `/name` in a session.
 
 ---
-
-## 3. Installation
-
-```sh
-dsh plugin --profile web add dsh-skill-scope
-```
-
-Replace `--profile web` with the name of your own profile.
