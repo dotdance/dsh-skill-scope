@@ -1,5 +1,5 @@
 {
-  "name": "dsh-skill-scope",
+  "name": "@dotdance/dsh-skill-scope",
   "version": "0.1.0",
   "description": "Skill and MCP visibility manager for DeepSeek Harness: a global hard ceiling plus per-workspace narrowing, with a sidebar panel and an input-card entry.",
   "type": "module",
