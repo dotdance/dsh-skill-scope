@@ -227,8 +227,8 @@ export function CloverIcon(props: { size?: number }): ReactNode {
  * **状态 tag 复用宿主 `Tag` 基元**（`tone="success"` / `"neutral"`），理由与原先的来源标签一致：
  * ① 主题与暗色由基元统一处理，自己写会漂移；② `Tag` 在宿主模块表里，`require` 命中单例，
  * 不会重复打包一份样式；③ 它让本 bundle 真的 import 了
- * `@deepseek-ai/dsh-client-ui-primitives`——这与 `package.json` 的
- * `dsh.client.external` 声明一致（声明为外部依赖，就必须真的有该模块请求）。
+ * `@deepseek-ai/dsh-client-ui-primitives`，而该包属于宿主 client baseline 的种子模块，
+ * 运行期由宿主 shell 提供——这正是不需要在 `dsh.client.external` 里声明它的原因。
  */
 function CapabilityCard(props: CapabilityListProps & { row: CapabilityRow; testId?: string }): ReactNode {
   const { row, testId } = props

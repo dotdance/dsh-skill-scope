@@ -23,7 +23,20 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
  */
 
 const BUNDLE_PATH = fileURLToPath(new URL('../../lib/client.js', import.meta.url))
-const TAG_ID = 'dsh-skill-scope/styles.module.css'
+
+/**
+ * client bundle 的模块 id。
+ *
+ * **必须等于已发布的包名** `@dotdance/dsh-skill-scope`：宿主按 loader 条目的 `name`
+ * 查客户端 bundle，客户端侧再用同一个字符串查模块表并执行工厂
+ * （`dsh-client-modules/lib/client.js` 的 `makeRequire` → `factories` 命中）。
+ * 两边不一致时工厂永不执行，插件在 GUI 里完全无痕。
+ *
+ * 2026-10-16 修正：此前这里是裸 `dsh-skill-scope`，导致 id 与行名对不上
+ * （本机同时存在 `dsh-skill-scope` 这条 link projection，会让裸名解析到开发仓库）。
+ */
+const BUNDLE_ID = '@dotdance/dsh-skill-scope'
+const TAG_ID = `${BUNDLE_ID}/styles.module.css`
 
 /** 读产物文本；产物不存在时给出可自助修复的报错。 */
 function readBundle(): string {
@@ -86,14 +99,14 @@ describe('client bundle contract (design 8.2)', () => {
   it('registers itself through window.__ModuleLoader__.load with the exact id', () => {
     const { registered } = loadBundle(readBundle())
 
-    expect(registered.map((r) => r.id)).toEqual(['dsh-skill-scope'])
+    expect(registered.map((r) => r.id)).toEqual([BUNDLE_ID])
   })
 
   it('starts with the pinned wrapper banner', () => {
     const head = readBundle().slice(0, 200)
 
     expect(head.startsWith('window.__ModuleLoader__.load({')).toBe(true)
-    expect(head).toContain('id: "dsh-skill-scope"')
+    expect(head).toContain(`id: "${BUNDLE_ID}"`)
   })
 
   it('exposes apply and inject from the factory exports', () => {
@@ -118,28 +131,101 @@ describe('client bundle contract (design 8.2)', () => {
     const { requested } = loadBundle(readBundle())
 
     /*
-     * **这条断言为什么要改（2026-10-12 由 lead 裁定，证据如下）**
+     * **这条断言为什么这么写（2026-10-12 首次修正，2026-10-16 二次修正）**
      *
-     * 它原来要求产物同时 require `dsh.client.external` 里那**三项**。那是把
-     * `external` 当成了「要合成的 require 清单」，而它实际是**运行期可用性/放行清单**。
-     * 真实证据：官方 `@deepseek-ai/dsh-client-ui-shortcuts/lib/client.js` 只 require 自己
-     * 源码真正用到的模块（`dsh-client-store`、`dsh-client-ui-primitives`、`react`、
-     * `react/jsx-runtime`），而它的 `package.json` **根本没有 `dsh.client.external` 字段**。
-     * 即：**require 集合由源码的 import 决定，不由 external 清单决定。**
+     * 最初它要求产物同时 require `dsh.client.external` 里那**三项**。那是把
+     * `external` 当成了「要合成的 require 清单」。
      *
-     * 因此原写法有一条**无法满足**的分支：`@deepseek-ai/dsh-client-runtime/client` 在本机
-     * `require.resolve` 直接 MISSING（哪都没有这个包），本插件也没有任何用途需要它。
-     * 要让它出现在产物里，只能凭空 import 一个不存在的包——那会让产物在真实宿主里**加载失败**，
-     * 远比放宽这条断言糟糕。`neverBundle` 保留三项：清单里多一个未用项无害，
-     * 合成一个取不到的 require 有害。
+     * 真实语义（2026-10-16 用官方语料实测定案）：`external` 是
+     * 「**client baseline 之外**的精确模块请求」——即「我 require 了**别的插件**的 client 半边」。
+     * baseline 指宿主前端内建的种子模块表 `SZ()`，共 11 项（`react`、`react/jsx-runtime`、
+     * `react-dom`、`react-dom/client`、`@deepseek-ai/cordis`、`zod`、`@tanstack/react-virtual`、
+     * `@deepseek-ai/dsh-client-store`、`@deepseek-ai/dsh-client-ui-slots`、
+     * `@deepseek-ai/dsh-client-ui-primitives`、`@deepseek-ai/dsh-client-ui-dockkit`）。
+     * 这些模块**不在** `node_modules` 里，由宿主 shell 直接提供，声明进 `external` 是多余的。
      *
-     * 现在钉的是「插件真的用到的那个外部依赖必须有 require」——符合官方机制，
-     * 也正是 `dsh.client.external` 声明该包的意义（声明为外部 + 真的 require 它，
-     * 才说明这份声明不是空话）。react / react/jsx-runtime 由 client baseline 提供，一并断言。
+     * 官方语料印证：宿主安装内 60+ 个声明 `dsh.client` 的包绝大多数不写 `external`；
+     * 仅 6 个写，且**全部**指向另一个插件的 client 半边
+     * （`@deepseek-ai/dsh-api-*` → `@deepseek-ai/dsh-api-gateway/client`）。
+     *
+     * 结论：**require 集合由源码的 import 决定，不由 external 清单决定。**
+     * 本插件的三项请求全部落在 baseline 内，没有任何跨插件依赖，
+     * 因此 `dsh.client.external` 与 `neverBundle` 都应为**空**。
+     *
+     * 同时修正原注释里的一个错误推论：它说 `@deepseek-ai/dsh-client-runtime/client`
+     * 「本机 require.resolve 直接 MISSING」。该包确实不存在，但缺它**并不会**让插件失败——
+     * 它只是清单里一个悬空项，静默无用（且它本就非 baseline 又非真实依赖）。
+     * 真正需要保证的是：产物里出现的每个 require 都能在运行期被解析到。
      */
     expect(requested).toContain('@deepseek-ai/dsh-client-ui-primitives')
     expect(requested).toContain('react')
     expect(requested).toContain('react/jsx-runtime')
+  })
+
+  /*
+   * 回归守卫（2026-10-16 实测缺陷）：`dsh.client.external` 被当成了
+   * 「baseline 之外要声明的模块」的反面——它曾列出 `ui-slots` / `ui-primitives`
+   * 两项 **baseline 种子模块**，以及一个悬空的 `dsh-client-runtime/client`。
+   *
+   * 正确不变量：`external` 声明的每一项都必须是**本产物真的 require 了**的东西，
+   * 且**不得**是 baseline 种子模块（后者由宿主 shell 提供，写进去是多余且误导的）。
+   * 本插件三项请求全在 baseline 内 → 清单必须为空。
+   */
+  it('declares no client external beyond the platform baseline', () => {
+    const manifest = require('../../package.json') as {
+      dsh?: { client?: { external?: string[] } }
+    }
+    const external = manifest.dsh?.client?.external ?? []
+
+    /*
+     * baseline 种子表（`dsh-web-frontend` 产物内 `SZ()`），权威且版本相关。
+     * 这里只钉住本插件实际会碰到的子集之外也不需要——清单为空，断言最简。
+     */
+    const BASELINE = new Set([
+      'react',
+      'react/jsx-runtime',
+      'react-dom',
+      'react-dom/client',
+      '@deepseek-ai/cordis',
+      'zod',
+      '@tanstack/react-virtual',
+      '@deepseek-ai/dsh-client-store',
+      '@deepseek-ai/dsh-client-ui-slots',
+      '@deepseek-ai/dsh-client-ui-primitives',
+      '@deepseek-ai/dsh-client-ui-dockkit',
+    ])
+
+    for (const name of external) {
+      expect(
+        BASELINE.has(name),
+        `dsh.client.external 不应声明 baseline 种子模块 ${name}（由宿主 shell 提供）`,
+      ).toBe(false)
+      expect(
+        loadBundle(readBundle()).requested,
+        `dsh.client.external 声明的 ${name} 必须在产物里真的有 require`,
+      ).toContain(name)
+    }
+  })
+
+  /*
+   * 回归守卫（2026-10-16 实测缺陷）：把 `neverBundle` 按 `external` 的正确语义清空后，
+   * rolldown 转去解析 `@deepseek-ai/dsh-client-ui-primitives`，命中 `tsconfig.json` 的
+   * `paths` 映射（该映射指向**测试替身**），于是替身的源码与注释**被整个打进了发布产物**，
+   * 同时产物里真正的 `require(...)` 消失了。
+   *
+   * 这个缺陷很隐蔽：构建通过、类型检查通过、产物体积只差 2KB，
+   * 只有细看产物内容或断言之才发现。因此这里钉死两条：
+   * ① 测试替身的源码**绝不**能出现在产物里；
+   * ② 三个 baseline 模块请求必须**都**在产物里留下 require。
+   */
+  it('never leaks the test stub into the shipped bundle', () => {
+    const source = readBundle()
+
+    expect(source).not.toContain('tests/support/stubs')
+    expect(source).not.toContain('测试替身')
+
+    // 反向确认：该包必须以 require 形式交给运行期，而不是被内联。
+    expect(loadBundle(source).requested).toContain('@deepseek-ai/dsh-client-ui-primitives')
   })
 
   it('injects the compiled CSS module with both pinned data attributes', () => {
@@ -147,7 +233,7 @@ describe('client bundle contract (design 8.2)', () => {
 
     expect(source).toContain('data-plugin-css')
     expect(source).toContain(TAG_ID)
-    expect(source).toContain('"dsh-skill-scope"')
+    expect(source).toContain(`"${BUNDLE_ID}"`)
   })
 
   /*

@@ -33,7 +33,7 @@ import { WorkspaceChip, WorkspaceModal } from './WorkspaceModal.tsx'
  * ## 结构性类型（**不 import 任何 DSH 客户端包**）
  *
  * `@deepseek-ai/dsh-client-*` 全部不在本仓库的 `dependencies`/`devDependencies` 里
- * （它们是宿主的 client baseline，只通过 `dsh.client.external` 在运行期提供）。
+ * （它们是宿主的 client baseline 种子模块，由宿主 shell 直接提供）。
  * 因此这里声明一个**最小结构面** `ClientContextLike`，只包含本插件真正调用的成员。
  * 好处有两个：编译期不依赖宿主包；单测可以用纯对象替身（见 `tests/support/fake-client-ctx.ts`）。
  */

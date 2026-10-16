@@ -22,22 +22,34 @@ import { defineConfig, type UserConfig } from 'tsdown'
  * `Object.defineProperty(exports, Symbol.toStringTag, ...)` 由 rolldown 自己为 CJS 输出加上，
  * **不要**手写：重复写一次会让它在产物里出现两遍，而真实产物只有一遍。
  *
- * ## `deps.neverBundle` 必须与 `package.json` 的 `dsh.client.external` 逐项一致
+ * ## `neverBundle` 与 `dsh.client.external` 是**两个不同的集合**，不要合并
  *
- * 官方语义：`external` 是「client baseline **之外**的精确模块请求」，未声明即运行期取不到。
- * 一个取不到的 `require` 会让整个 bundle 加载失败（不是某个功能失效，是整片白）。
- * 所以两边都只列**这三项**：`react` / `react/jsx-runtime` 由 client baseline 提供，
- * 不需要出现在任何一边。
+ * 二者曾被写成「逐项一致」，那是错的（2026-10-16 实测纠正）：
+ * - `neverBundle` = **构建期**指令：命中的模块不解析、不内联，产物里留下 `require(...)`。
+ * - `external` = **运行期**声明：只列 baseline **之外**的模块请求（即「我 require 了别的插件的
+ *   client 半边」）。本插件没有这类依赖，所以为空。
+ *
+ * baseline 指宿主前端内建的种子模块表 `SZ()`（`dsh-web-frontend` 产物内），本版共 11 项：
+ * `react` / `react/jsx-runtime` / `react-dom` / `react-dom/client` / `@deepseek-ai/cordis` /
+ * `zod` / `@tanstack/react-virtual` / `@deepseek-ai/dsh-client-store` /
+ * `@deepseek-ai/dsh-client-ui-slots` / `@deepseek-ai/dsh-client-ui-primitives` /
+ * `@deepseek-ai/dsh-client-ui-dockkit`。
+ *
+ * 这些模块**不在** `node_modules` 里（直接解析会报 MODULE_NOT_FOUND），由宿主 shell 提供。
+ * 但**构建期仍必须把它们列进 `neverBundle`**，否则 rolldown 会去解析它们——
+ * 而 `tsconfig.json` 的 `paths` 把 `@deepseek-ai/dsh-client-ui-primitives` 指向测试替身，
+ * 结果就是**测试替身被打进发布产物**（详见下方 `CLIENT_NEVER_BUNDLE` 注释的实测记录）。
+ *
+ * 官方语料印证 `external` 的语义：宿主安装内 60+ 个声明 `dsh.client` 的包绝大多数不写
+ * `external`（如 `dsh-client-ui-shortcuts`，它的产物照样有 `require`）；
+ * 仅 6 个写，且**全部**指向另一个插件的 client 半边
+ * （`@deepseek-ai/dsh-api-*` → `@deepseek-ai/dsh-api-gateway/client`）。
  */
 
-/** client bundle 的包 id。同时用作 CSS 注入的 `data-plugin` 值（设计 D5）。 */
-const PLUGIN_ID = 'dsh-skill-scope'
+const PLUGIN_ID = '@dotdance/dsh-skill-scope'
 
-/** `package.json` 的 `dsh.client.external`，逐项一致。 */
-const CLIENT_EXTERNAL = [
-  '@deepseek-ai/dsh-client-ui-slots',
+const CLIENT_NEVER_BUNDLE = [
   '@deepseek-ai/dsh-client-ui-primitives',
-  '@deepseek-ai/dsh-client-runtime/client',
 ] as const
 
 /**
@@ -49,10 +61,10 @@ const CLIENT_EXTERNAL = [
  * 产出的形状（与真实产物逐字对齐）：
  * ```js
  * const css = "...";                       // 压缩后的 CSS 文本
- * const tagId = "dsh-skill-scope/styles.module.css";
+ * const tagId = "@dotdance/dsh-skill-scope/styles.module.css";
  * if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId) + "]") === null) {
  *   const tag = document.createElement("style");
- *   tag.dataset.plugin = "dsh-skill-scope";
+ *   tag.dataset.plugin = "@dotdance/dsh-skill-scope";
  *   tag.dataset.pluginCss = tagId;
  *   tag.textContent = css;
  *   document.head.appendChild(tag);
@@ -179,9 +191,8 @@ const clientTarget: UserConfig = {
   clean: false,
   sourcemap: true,
   fixedExtension: false,
-  // 三个 external 请求与 package.json 逐项一致；漏一个会让产物里的 require 在运行期取不到，
-  // 表现是**整个** bundle 加载失败。
-  deps: { neverBundle: [...CLIENT_EXTERNAL] },
+  // 必须用 CLIENT_NEVER_BUNDLE（构建期指令），不要拿 package.json 的 external 来推。
+  deps: { neverBundle: [...CLIENT_NEVER_BUNDLE] },
   outputOptions: {
     entryFileNames: 'client.js',
     banner: `window.__ModuleLoader__.load({ id: "${PLUGIN_ID}", factory: (require) => {`,

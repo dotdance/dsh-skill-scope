@@ -5,8 +5,9 @@ import type { ReactNode } from 'react'
  *
  * ## 为什么需要它
  *
- * 这个包是 `dsh.client.external` 的一项：官方语义是「由宿主 client baseline 在**运行期**
- * 提供，插件不安装它、也不打包它」。构建侧（rolldown）把它标成 external，产物里留下
+ * 这个包属于宿主 client baseline 的**种子模块**：官方语义是「由宿主 shell 在**运行期**
+ * 提供，插件不安装它、也不打包它」，因此它**不需要**出现在 `dsh.client.external` 里。
+ * 构建侧（rolldown）把它标成 neverBundle，产物里留下
  * `require("@deepseek-ai/dsh-client-ui-primitives")`，这是对的。
  *
  * 但**测试环境里没有这个 require**。实测：
