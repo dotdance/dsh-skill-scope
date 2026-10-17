@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, afterEach, beforeEach } from 'vitest'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { EMPTY_POLICY } from '../../src/policy/schema.ts'
 import { PolicyStore, type PolicyFsLike } from '../../src/policy/store.ts'
 import { globalPolicyPath, workspacePolicyPath } from '../../src/policy/paths.ts'
@@ -14,6 +17,20 @@ import {
 import { makeFakeCtx } from '../support/fake-ctx.ts'
 import type { PluginContextLike } from '../../src/routes/session.ts'
 import { registerRoutes, type FetchRegisterFace, type FetchRouteSpec } from '../../src/routes/register.ts'
+
+/**
+ * 一个**真实存在**的工作区目录。
+ *
+ * `handleWorkspaceSave` → `store.saveWorkspace` → `ensureParentDir`（`src/policy/store.ts:66`）
+ * 会走**真实 `mkdir`**，它不受本文件注入的 `fs` 替身控制。因此凡是「保存成功」的用例，
+ * cwd 必须是磁盘上真实可写的目录：写死 `/Users/go/proj/demo` 只在作者本机恰好存在时通过，
+ * 换到 CI 的干净 runner 就 `EACCES`（实测 Linux 上 `/Users` 需 root 才能创建）。
+ *
+ * 用 `mkdtemp` 造一次性目录：平台无关、可写、用例之间彼此隔离。
+ */
+async function makeRealCwd(): Promise<string> {
+  return await mkdtemp(join(tmpdir(), 'dsh-sm-routes-'))
+}
 
 /** 内存文件系统替身：与 tests/policy/store.spec.ts 同形，用真实 PolicyStore 跑路由逻辑。 */
 function makeFs(initial: Record<string, string> = {}) {
@@ -64,7 +81,10 @@ function makeDeps(options: {
     logger: { warn: (message) => warnings.push(message) },
   })
   const states = new AgentStates()
-  const knownCwd = options.agent?.session.header?.cwd ?? '/Users/go/proj/demo'
+  // 无 agent 时的占位 cwd。**刻意用一个不存在的路径**：这些用例不落在保存路径上，
+  // 一旦将来有谁在无 agent 的 deps 上触发保存，就应该立刻炸，而不是静默依赖
+  // 作者本机恰好存在某个目录（那正是本轮 CI 失败的成因）。
+  const knownCwd = options.agent?.session.header?.cwd ?? '/nonexistent/dsh-test/no-agent'
   // ctx 只提供 sessionQuery / agents：handleWorkspace 走的是真实解析路径。
   // `observeSession` 必须对**未知 sessionId 抛错**——这是宿主行为，也是 unknown-session 的来源；
   // 若它无条件成功，用例 3/6 就永远测不出 unknown-session。
@@ -154,7 +174,8 @@ function ctxWithoutAgent(_base: PluginContextLike, id: string, cwd: string): Plu
 
 /** 与 `makeDeps` 同一个 ctx 一起返回（`registerRoutes` 需要 ctx + deps 两者）。 */
 function makeDepsWithCtx(options: { agent?: AgentLike; tools?: string[]; hiddenIn?: string[] } = {}) {
-  const agent = options.agent ?? makeAgent('s1', '/Users/go/proj/demo')
+  // 同样用不存在的占位路径：调用方只测注册面/只读路由，不落在保存路径上。
+  const agent = options.agent ?? makeAgent('s1', '/nonexistent/dsh-test/no-agent')
   const built = makeDeps({ agent, tools: options.tools, hiddenIn: options.hiddenIn })
   return { ...built, ctx: built.deps.ctx }
 }
@@ -173,7 +194,7 @@ describe('handleGlobal', () => {
   })
 
   it('answers a session-scoped read the same way as an unscoped one', async () => {
-    const agent = makeAgent('s1', '/Users/go/proj/demo')
+    const agent = makeAgent('s1', '/nonexistent/dsh-test/global-read')
     const { deps, states } = makeDeps({ agent })
     const state = states.ensure(agent)
     const empty: EffectivePolicy = { global: EMPTY_POLICY, workspace: null }
@@ -316,6 +337,10 @@ describe('handleGlobalSave', () => {
 })
 
 describe('handleWorkspace', () => {
+  // 只读用例：cwd 只作为字符串在断言之间流转，不需要真实目录。
+  // 但仍避免写死作者本机的路径——换个名字即可，语义一样。
+  const cwd = '/nonexistent/dsh-test/workspace-read'
+
   it('rejects an unknown session with unknown-session', async () => {
     const { deps } = makeDeps()
     expect(await handleWorkspace({ sessionId: 'nope' }, deps)).toEqual({
@@ -326,19 +351,19 @@ describe('handleWorkspace', () => {
 
   it('marks a workspace read with no live agent as live:false and still returns a policy', async () => {
     // 「会话可解析但没有 live Agent」：`observeSession` 成功、`agents.get` 返回 undefined。
-    const agent = makeAgent('s1', '/Users/go/proj/demo')
+    const agent = makeAgent('s1', cwd)
     const { deps } = makeDeps({ agent })
-    const orphan: RouteDeps = { ...deps, ctx: ctxWithoutAgent(deps.ctx, 's1', '/Users/go/proj/demo') }
+    const orphan: RouteDeps = { ...deps, ctx: ctxWithoutAgent(deps.ctx, 's1', cwd) }
     const out = await handleWorkspace({ sessionId: 's1' }, orphan)
-    expect(out).toMatchObject({ ok: true, value: { live: false, exists: false, cwd: '/Users/go/proj/demo' } })
+    expect(out).toMatchObject({ ok: true, value: { live: false, exists: false, cwd } })
     if (out.ok) {
       expect(out.value.policy).toEqual(EMPTY_POLICY)
-      expect(out.value.policyPath).toBe(workspacePolicyPath('/Users/go/proj/demo'))
+      expect(out.value.policyPath).toBe(workspacePolicyPath(cwd))
     }
   })
 
   it('prefers the live agent scoped inventory and reports live:true', async () => {
-    const agent = makeAgent('s1', '/Users/go/proj/demo')
+    const agent = makeAgent('s1', cwd)
     const { deps, states } = makeDeps({ agent, skills: [{ name: 'global-only' }] })
     states.ensure(agent)
     const scoped: RouteDeps = {
@@ -394,22 +419,31 @@ describe('handleWorkspace', () => {
 })
 
 describe('handleWorkspaceSave', () => {
+  // 这个块的用例会真正走到 `ensureParentDir` 的真实 `mkdir`，cwd 必须是真目录。
+  let cwd: string
+  beforeEach(async () => {
+    cwd = await makeRealCwd()
+  })
+  afterEach(async () => {
+    await rm(cwd, { recursive: true, force: true })
+  })
+
   it('writes the workspace file', async () => {
-    const agent = makeAgent('s1', '/Users/go/proj/demo')
+    const agent = makeAgent('s1', cwd)
     const { deps, files } = makeDeps({ agent })
     const out = await handleWorkspaceSave(
       { sessionId: 's1', mode: 'blacklist', skills: ['a'], mcps: [], revision: null },
       deps,
     )
-    expect(out).toMatchObject({ ok: true, value: { cwd: '/Users/go/proj/demo', exists: true, live: true } })
+    expect(out).toMatchObject({ ok: true, value: { cwd, exists: true, live: true } })
     if (out.ok) expect(out.value.revision).toMatch(/^[0-9a-f]{64}$/)
-    expect(files.get(workspacePolicyPath('/Users/go/proj/demo'))).toContain('"blacklist"')
+    expect(files.get(workspacePolicyPath(cwd))).toContain('"blacklist"')
   })
 
   it('reports live:false on a save for a session with no live agent', async () => {
-    const agent = makeAgent('s1', '/Users/go/proj/demo')
+    const agent = makeAgent('s1', cwd)
     const { deps } = makeDeps({ agent })
-    const orphan: RouteDeps = { ...deps, ctx: ctxWithoutAgent(deps.ctx, 's1', '/Users/go/proj/demo') }
+    const orphan: RouteDeps = { ...deps, ctx: ctxWithoutAgent(deps.ctx, 's1', cwd) }
     expect(
       await handleWorkspaceSave(
         { sessionId: 's1', mode: 'blacklist', skills: ['a'], mcps: [], revision: null },
@@ -435,7 +469,7 @@ describe('handleWorkspaceSave', () => {
    * 若有人删掉 `deps.reapplyAfterSave()`，这条用例立刻失败。
    */
   it('reapplies the policy after a successful workspace save', async () => {
-    const agent = makeAgent('s1', '/Users/go/proj/demo')
+    const agent = makeAgent('s1', cwd)
     const { deps, reapplyCalls } = makeDeps({ agent })
     const out = await handleWorkspaceSave(
       { sessionId: 's1', mode: 'blacklist', skills: ['a'], mcps: [], revision: null },
@@ -446,7 +480,7 @@ describe('handleWorkspaceSave', () => {
   })
 
   it('does not reapply when the workspace save is rejected', async () => {
-    const agent = makeAgent('s1', '/Users/go/proj/demo')
+    const agent = makeAgent('s1', cwd)
     const { deps, reapplyCalls } = makeDeps({ agent })
     const out = await handleWorkspaceSave(
       // 非法名字：`validatePolicyInput` 直接拒绝，不应走到重新落地。
@@ -459,6 +493,15 @@ describe('handleWorkspaceSave', () => {
 })
 
 describe('registerRoutes', () => {
+  // 嵌套的 `workspace inventory` 块里有「保存成功」的用例，同样会走真实 `mkdir`。
+  let cwd: string
+  beforeEach(async () => {
+    cwd = await makeRealCwd()
+  })
+  afterEach(async () => {
+    await rm(cwd, { recursive: true, force: true })
+  })
+
   /** 记录注册面的替身，同时能观察 disposer 是否被调用。 */
   function makeRegister() {
     const specs: FetchRouteSpec[] = []
@@ -572,7 +615,7 @@ describe('registerRoutes', () => {
   describe('workspace inventory does not filter on modelInvocable', () => {
     it('lists a non-invocable skill in the workspace inventory too', async () => {
       const { deps } = makeDeps({
-        agent: makeAgent('session-live', '/Users/go/proj/demo'),
+        agent: makeAgent('session-live', cwd),
         skills: [
           { name: 'invocable-one', modelInvocable: true },
           { name: 'user-only', modelInvocable: false },
@@ -630,7 +673,7 @@ describe('registerRoutes', () => {
      * 本用例只盯**两条路由一致**这一件事。
      */
     it('applies the same composition on the save read-back path as on the workspace read path', async () => {
-      const agent = makeAgent('s1', '/Users/go/proj/demo')
+      const agent = makeAgent('s1', cwd)
       const skills = [
         { name: 'invocable-one', modelInvocable: true },
         { name: 'user-only', modelInvocable: false },
@@ -677,7 +720,7 @@ describe('registerRoutes', () => {
    */
   describe('a workspace-closed skill stays visible so the user can reopen it', () => {
     it('restores a workspace-blacklisted skill that has vanished from the agent scope', async () => {
-      const agent = makeAgent('session-live', '/Users/go/proj/demo')
+      const agent = makeAgent('session-live', cwd)
       const { deps } = makeDeps({
         agent,
         skills: [{ name: 'kept' }, { name: 'closed-here' }],
@@ -699,7 +742,7 @@ describe('registerRoutes', () => {
      * 而被补回。两层名单都能命中一个名字时，全局层说了算（工作区只能收窄）。
      */
     it('does not restore a skill that is also closed globally', async () => {
-      const agent = makeAgent('session-live', '/Users/go/proj/demo')
+      const agent = makeAgent('session-live', cwd)
       const { deps } = makeDeps({
         agent,
         skills: [{ name: 'kept' }, { name: 'closed-both' }],
@@ -733,7 +776,7 @@ describe('registerRoutes', () => {
      * 过滤是 no-op，实测确实抓不到。
      */
     it('lists a skill the model cannot invoke instead of filtering it out', async () => {
-      const agent = makeAgent('session-live', '/Users/go/proj/demo')
+      const agent = makeAgent('session-live', cwd)
       const { deps } = makeDeps({
         agent,
         skills: [{ name: 'kept' }, { name: 'closed-here', modelInvocable: true }],
@@ -760,7 +803,7 @@ describe('registerRoutes', () => {
      * 这一条会立刻失败。
      */
     it('keeps a skill marked disable-model-invocation in the workspace inventory', async () => {
-      const agent = makeAgent('session-live', '/Users/go/proj/demo')
+      const agent = makeAgent('session-live', cwd)
       const { deps } = makeDeps({
         agent,
         skills: [{ name: 'kept' }, { name: 'human-only', modelInvocable: false }],
@@ -781,7 +824,7 @@ describe('registerRoutes', () => {
      * 没有行数据就渲染不出描述与来源，硬塞只会给用户一个点不动的开关。
      */
     it('skips a workspace-blacklisted name that no longer exists anywhere', async () => {
-      const agent = makeAgent('session-live', '/Users/go/proj/demo')
+      const agent = makeAgent('session-live', cwd)
       const { deps } = makeDeps({
         agent,
         skills: [{ name: 'kept' }],
@@ -811,7 +854,7 @@ describe('registerRoutes', () => {
    */
   describe('global layer is a hard ceiling for the workspace', () => {
     it('removes globally blacklisted skills from the workspace inventory', async () => {
-      const agent = makeAgent('session-live', '/Users/go/proj/demo')
+      const agent = makeAgent('session-live', cwd)
       const { deps } = makeDeps({
         agent,
         skills: [{ name: 'kept' }, { name: 'closed-globally' }, { name: 'also-kept' }],
@@ -828,7 +871,7 @@ describe('registerRoutes', () => {
     })
 
     it('removes globally blacklisted mcps and reports them in disabledGlobally', async () => {
-      const agent = makeAgent('session-live', '/Users/go/proj/demo')
+      const agent = makeAgent('session-live', cwd)
       const { deps } = makeDeps({ agent, tools: ['mcp__gbrain__search', 'mcp__other__ping'] })
       await handleGlobalSave({ mode: 'blacklist', skills: [], mcps: ['gbrain'], revision: null }, deps)
 
@@ -843,7 +886,7 @@ describe('registerRoutes', () => {
      * 若在摘除前统计，UI 会显示「继承自全局：2 项」而列表里只有 1 行。
      */
     it('counts inherited totals after the global removals', async () => {
-      const agent = makeAgent('session-live', '/Users/go/proj/demo')
+      const agent = makeAgent('session-live', cwd)
       const { deps } = makeDeps({ agent, tools: ['mcp__gbrain__search', 'mcp__other__ping'] })
       await handleGlobalSave({ mode: 'blacklist', skills: [], mcps: ['gbrain'], revision: null }, deps)
 
@@ -863,7 +906,7 @@ describe('registerRoutes', () => {
      * 「listed 被全局关闭」，工作区层面必须如实摘除它，而不是整份清单照旧可见。
      */
     it('hides exactly the globally listed names (the un-enumerable gap is closed)', async () => {
-      const agent = makeAgent('session-live', '/Users/go/proj/demo')
+      const agent = makeAgent('session-live', cwd)
       const { deps } = makeDeps({ agent, skills: [{ name: 'listed' }, { name: 'not-listed' }] })
       await handleGlobalSave({ mode: 'blacklist', skills: ['listed'], mcps: [], revision: null }, deps)
 

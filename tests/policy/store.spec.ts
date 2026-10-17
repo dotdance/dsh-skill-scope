@@ -196,8 +196,22 @@ describe('真实文件系统：全局策略目录不存在时也能写入（回�
 })
 
 describe('工作区策略', () => {
+  // 工作区用例必须用**真实存在**的 cwd：`saveWorkspace` 内部会调
+  // `ensureParentDir`（真实 `mkdir`，不走注入的 fs 替身），把 cwd 写成
+  // `/Users/go/proj/demo` 这类固定路径时，只有在作者本机恰好存在才通过，
+  // 换到 CI 的干净 runner 就 `EACCES`。用 `mkdtemp` 造一次性目录，
+  // 平台无关且彼此隔离。
+  let cwd: string
+
+  beforeEach(async () => {
+    cwd = await mkdtemp(join(tmpdir(), 'dsh-sm-ws-'))
+  })
+
+  afterEach(async () => {
+    await rm(cwd, { recursive: true, force: true })
+  })
+
   it('loads from the workspace path and reports it', async () => {
-    const cwd = '/Users/go/proj/demo'
     // 落盘上的 `whitelist` 是被删除的历史取值：读取时归一到 `blacklist`，
     // 名单原样保留。这条用例现在同时是「废弃模式迁移」的回归守卫。
     const { store } = makeStore({
@@ -209,7 +223,6 @@ describe('工作区策略', () => {
   })
 
   it('keeps unknown top-level keys when saving the workspace policy', async () => {
-    const cwd = '/Users/go/proj/demo'
     const { store, files } = makeStore({
       [workspacePolicyPath(cwd)]: '{"note":"keep me","default":{"mode":"default","skills":[],"mcps":[]}}',
     })
