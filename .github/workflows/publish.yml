@@ -117,11 +117,13 @@ jobs:
       - name: Typecheck
         run: pnpm run typecheck
 
-      - name: Test
-        run: pnpm run test
-
+      # Build 必须在 Test 之前：lib/ 在 .gitignore 里（仓库不提交构建产物），
+      # 而 client 的测试会读取 lib/client.js，CI 干净检出时它并不存在。
       - name: Build
         run: pnpm run build
+
+      - name: Test
+        run: pnpm run test
 
       # lib/ 在 .gitignore 里（仓库不提交构建产物），
       # 所以这一步必须自检产物体积，防止"空包发布"。
