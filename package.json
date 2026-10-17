@@ -14,7 +14,8 @@
     "cordis.patch.yml"
   ],
   "engines": {
-    "node": "^22.19.0 || >=24.0.0"
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": "^0.2.1-alpha.2"
   },
   "scripts": {
     "build": "tsdown",
@@ -32,6 +33,10 @@
     "cordis"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dotdance/dsh-skill-scope.git"
+  },
   "dependencies": {
     "@deepseek-ai/dsh-atomic-write": "^0.2.1-alpha.2",
     "@deepseek-ai/dsh-home-paths": "^0.2.1-alpha.2",

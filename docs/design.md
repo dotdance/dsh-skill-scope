@@ -469,8 +469,8 @@ skill-scope/  └─────────────────────
 | 包名 | `dsh-skill-scope`（与仓库同名） |
 | 许可 | MIT |
 | 模块形态 | `type: "module"`，`exports`: `.` → `lib/index.js`，`./client` → `lib/client.js` |
-| engines | `node: "^22.19.0 || >=24.0.0"` |
-| 兼容性 | **`peerDependencies` 里的 `@deepseek-ai/dsh-*` 区间** —— 这是唯一被消费的机制（`dsh-app-boot` 的 `evaluatePluginCompatibility`：「Check every `@deepseek-ai/dsh` or `@deepseek-ai/dsh-*` peer against the runtime」）。`dsh.engines.dsh` 与 `dsh.compatibility.dshReleases` 在已装包里**没有任何消费者**，不采用。 |
+| engines | `node: "^22.19.0 || >=24.0.0"`；`dsh: "^0.2.1-alpha.2"`（见 13.8：v1.7 那条「engines.dsh 无消费者」的结论已被源码证伪） |
+| 兼容性 | **`engines.dsh`（本版本起采用）** 与 **`peerDependencies` 里的 `@deepseek-ai/dsh-*` 区间**都是被消费的机制，由 `dsh-app-boot` 的 `evaluatePluginCompatibility` 判定。**二者不是并存关系：一旦声明 `engines.dsh`，它单独决定，`peerDependencies` 里的 dsh 项被完全忽略**（`dsh-app-boot/README.md:52`：「When the manifest declares `engines.dsh`, that range alone decides and `peerDependencies` are ignored.」）。`peerDependencies` 里**非 dsh 的项**（`@deepseek-ai/cordis`、`react`）不受影响，仍照常生效。不存在的 `dsh.engines.dsh` / `dsh.compatibility.dshReleases` 仍不采用。 |
 | bundle | `dsh.bundle.patch` → `./cordis.patch.yml`（`insert` 一行 `dsh-skill-scope`） |
 | client | `dsh.client = { platform: 'web', inject: [...包名图...], external: ['@deepseek-ai/dsh-client-ui-slots', '@deepseek-ai/dsh-client-ui-primitives', '@deepseek-ai/dsh-client-runtime/client'] }`（字段语义见 `@deepseek-ai/dsh-package-manifest/lib/types/types.d.ts:75-92`：`inject` 只是信息性包名依赖，**不是** cordis 服务注入；`external` 是「client baseline 之外的精确模块请求」，含 `<pkg>/client` 这类子路径，未声明即运行期失败） |
 | 不采用 | `dsh.dynamic`（那是某个插件开发回路的私有约定，官方 `dsh-client-modules` 不读，因此不是可用契约） |
@@ -660,7 +660,7 @@ window.__ModuleLoader__.load({
 | Fetch 路由校验规则 | `<PKG>/dsh-client-connection/lib/index.js:814-818` |
 | Host/Origin 与登录态闸门（`admit`） | `<PKG>/dsh-client-connection/lib/index.js:640-652` |
 | 官方 `resolveDshHome` / `dshHomePath` | `<PKG>/dsh-home-paths/lib/types/index.d.ts:59,78` |
-| 兼容性只由 peerDependencies 判定 | `<PKG>/dsh-app-boot/lib/index.js:286`（`evaluatePluginCompatibility`） |
+| 兼容性由 `engines.dsh` 或 peerDependencies 判定；**`engines.dsh` 优先且单独决定** | `<PKG>/dsh-app-boot/lib/index.js:279-299`（`unmetRequirements`：`:281-285` 是 `engines.dsh` 分支并**提前 return**，`:286-298` 才是 peer 回退分支）、`:301-304`（该函数的官方 JSDoc 明文：「An own `engines.dsh` range decides alone and peerDependencies are ignored」）、`<PKG>/dsh-app-boot/README.md:52`（规范性说明）、`<PKG>/dsh-package-manifest/lib/types/types.d.ts:54-64`（`DshEnginesManifest.dsh` 官方类型定义） |
 | **官方 API 参考目录本身**（服务/事件/类型的权威描述文本） | `<PKG>/dsh-tool-cordis/lib/types/api-catalog.js`（`SERVICE_API` / `EVENT_API` / `TYPE_API`；宿主 `cordis_inspect` 暴露其查询面） |
 | `skills.register` 的契约：borrowed readonly runtime skill；同层同名 **first-wins**，重复只告警并给 no-op disposer | 同上，服务 `skills` 的 `register` 描述；实现 `<PKG>/dsh-skill/lib/index.js:193-215` |
 | `skills.snapshot`：不完整观察**不缓存**，消费者保留 last-good 并在下次请求边界重试 | 同上，服务 `skills` 的 `snapshot` 描述 |
@@ -871,6 +871,86 @@ verified.skills.find((s) => denied.has(s.name) && s.invocation?.modelInvocable !
 在 `agent/created` 里**同步**注册进 Agent 层，本插件同事件注册但要先 `await` 读策略，必然落后；
 `dsh-skill` 同层重名**静默丢弃后来者**。该重名竞争此前**同样漏掉它**（`session-c95beb02`，14:01，
 注入 `count 1 ['browser-skill']`）。**不采用**每轮先撕后贴：与 prompt cache 冲突且未真正解决该案例。
+
+---
+
+### 13.8 v1.8（2026-10-17：纠正 v1.2 关于 `engines.dsh` 的结论，并改用 `engines.dsh` 声明兼容性）
+
+**背景**：用户要求「DSH 的版本识别加上用 engine 来识别」。
+
+**一、纠正 v1.2 的错误结论（M4/§8.1/§12 三处）**
+
+v1.2 写下的两处断言被源码证伪：
+
+- §8.1：「`dsh.engines.dsh` … 在已装包里**没有任何消费者**，不采用。」
+- §12 参考表：「兼容性只由 peerDependencies 判定 | `<PKG>/dsh-app-boot/lib/index.js:286`」
+
+**错因（定位到行）**：v1.2 引用的是 `:286`，而 `:286` 属于 peer 回退分支的**入口**。真实的控制流是
+`unmetRequirements` 先判 `engines.dsh`（`:281-285`），命中即 **return**；只有**没有** `engines.dsh` 时
+才走到 `:286` 起的 peer 遍历。v1.2 只读到回退分支，把它误当成唯一分支，于是漏掉了它上面 5 行的提前返回。
+
+**权威依据（本次实测）**：
+
+1. 源码：`<PKG>/dsh-app-boot/lib/index.js:279-299`（`unmetRequirements`）、`:301-304` 的官方 JSDoc 原文
+   「An own `engines.dsh` range decides alone and peerDependencies are ignored」。
+2. 规范性文档：`<PKG>/dsh-app-boot/README.md:52`（「When the manifest declares `engines.dsh`, that range alone
+   decides and `peerDependencies` are ignored … A manifest with neither declaration imposes no constraint;
+   empty or invalid ranges, including a `workspace:` value in `engines.dsh`, are incompatible.」）。
+3. 官方类型定义：`<PKG>/dsh-package-manifest/lib/types/types.d.ts:54-64`（`DshEnginesManifest`，注释
+   「Runtime version requirements under `package.json.engines`」；`:56-57` 定义 `dsh?: string`）。
+4. 官方消费者文档：`<PKG>/dsh-plugin-manager/README.md:75`（拒绝记录「keyed `engines.dsh` or by DSH peer
+   package name」——两把钥匙都是官方承认的）。
+
+**结论改写**：`engines.dsh` **是被消费的**，且**优先级高于** peerDependencies。§8.1 与 §12 已按此重写。
+不采用的只剩 `dsh.compatibility.dshReleases`（该字段在 `DshManifest` 里根本不存在，
+`types.d.ts:28-37` 只有 `manifestVersion` / `bundle` / `profile` / `client`）。
+
+**二、本插件改用 `engines.dsh`**
+
+`package.json` 的 `engines` 增加 `"dsh": "^0.2.1-alpha.2"`。
+
+**等价性论证（实测，非推断）**：本插件 5 个 dsh peer 声明的区间**完全相同**，均为 `^0.2.1-alpha.2`
+（`@deepseek-ai/dsh-agent`、`-client-connection`、`-host-webserver`、`-skill`、`-tools`）。
+因此用单一 `engines.dsh` 覆盖它们，**判定结论完全等价**。用官方 `evaluatePluginCompatibility` 直接对比
+（旧形态 = 删掉 `engines.dsh` 的同一份 manifest）在 `0.2.1-alpha.2` / `-alpha.5` / `0.2.1` / `0.2.2` /
+`0.2.0` / `0.3.0` 六个运行时版本上**逐版本一致**（前四者 ok，后两者 均 INCOMPAT）。
+
+**这次改动的性质：声明口径统一，不改变任何实际判定结果。** 代价是粒度变粗：今后若某个 dsh peer
+需要与其它 peer 不同的区间，单一 `engines.dsh` 表达不了（官方不支持按包分列），届时须回到 peer 形态。
+
+**未受影响**：`peerDependencies` 中**非 dsh** 的项（`@deepseek-ai/cordis`、`react`）不参与该二选一，
+仍照常生效；`dsh-app-boot` 只挑名字为 `@deepseek-ai/dsh` 或 `@deepseek-ai/dsh-` 开头的 peer
+（`lib/index.js:291`）。
+
+**三、语义提醒（官方原话）**
+
+`<PKG>/dsh-package-manifest/lib/types/types.d.ts:22`：`engines` 是
+「Runtime requirements; **DSH compatibility is declarative until a reader enforces it**」。
+即该字段的可执行性取决于消费方（`dsh-app-boot` 在装配边界查、`dsh-plugin-manager` 在安装前查），
+**不是**恶意代码的沙箱（`app-boot/README.md:52` 末句明说「These checks are not a sandbox against
+malicious package code.」）。
+
+**验证**：`pnpm run test` 234 项全过（本改动不触及运行时代码，`tests/` 与 `src/` 无任何
+`engines`/`peerDependencies` 依赖点，已 grep 确认 0 命中）。
+
+**四、2026-10-17 当日随 DSH 升级到 `0.2.1-rc.2` 的复核**
+
+DSH 由 `0.2.1-alpha.5` 升到 `0.2.1-rc.2`（cordis 由 `4.0.5-alpha.2` 升到 `4.0.5`）后重查，结论**全部保持**：
+
+- 源码逐字未变：`<PKG>/dsh-app-boot@0.2.1-rc.2/lib/index.js:279-299` 与 alpha.5 **行号一致、逻辑一致**；
+  `:281-285` 仍是 `engines.dsh` 分支并提前 return，`:286` 仍是 peer 回退入口。该版本的函数注释进一步
+  简写为「Evaluate plugin dsh requirements (`engines.dsh`, else dsh peers)」（`:252`）。
+- 规范文本未变：rc.2 的 `app-boot/README.md:52`、`plugin-manager/README.md:75`、
+  `dsh-package-manifest/lib/types/types.d.ts:22/54-64` 三处与 alpha.5 逐字相同。
+- **判定实测**：以 rc.2 的官方 `evaluatePluginCompatibility` 测 `^0.2.1-alpha.2`，在
+  `0.2.1-alpha.2` / `-alpha.5` / `-rc.1` / `-rc.2` / `0.2.1` / `0.2.2` 六者上均为 **ok**（即预发布段
+  `alpha`→`rc` 的推进不破坏该区间）；`0.2.0` / `0.3.0` / `1.0.0` 仍为 INCOMPATIBLE。
+- **端到端实测（决定性）**：在真实 profile（`skilldev`）上执行 `dsh plugin --profile skilldev add`
+  （走 `dsh-plugin-manager` 的安装前判定），`^0.2.1-alpha.2` **通过**（exit 0）；临时把该区间改成
+  `^9.0.0` 后同一命令**被拒**，原文为
+  `dsh: installation rejected: Plugin @dotdance/dsh-skill-scope@0.2.0 is incompatible with dsh 0.2.1-rc.2: requirements {"engines.dsh":"^9.0.0"}.`
+  —— 既证明该字段在 rc.2 下确实被消费，也证明拒绝记录的键确为 `engines.dsh`。测试后已还原区间，
+  `version-exemptions` 仍为空（未留下豁免记录）。
 
 ---
 

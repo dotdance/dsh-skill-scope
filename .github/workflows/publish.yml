@@ -1,0 +1,150 @@
+# 把 GitHub Release 变成 npm 的发布按钮。
+#
+# 触发：在 GitHub 上**发布**（publish）一个 Release 时自动运行。
+# 鉴权：Trusted Publishing (OIDC)。**不需要任何 NPM_TOKEN secret。**
+#       npm 通过 GitHub 的 OIDC 身份确认"这次发布来自本仓库的这个 workflow"。
+#       前提：在 npmjs.com 的包 Settings → Trusted Publisher 里登记
+#             Workflow filename = publish.yml（只写文件名）。
+#
+# 手动兜底：也可以在 Actions 页面点 "Run workflow"，填版本号重跑。
+#           用途是 Release 已存在但 npm 发布失败时，不必重新建 Release。
+
+name: Publish to npm
+
+on:
+  # 手动入口。Release 已建好但 npm 没发成功时，用它补发。
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '要发布的版本号（必须等于 package.json 里的 version，例如 0.2.1）'
+        required: true
+        type: string
+
+  # 主入口：Release 被"发布"（草稿转正）时触发。
+  # 注意用 released 而不是 published：published 在"存为草稿"时也会触发。
+  release:
+    types: [released]
+
+# OIDC 需要 id-token: write；checkout 需要 contents: read。
+permissions:
+  contents: read
+  id-token: write
+
+# 同一版本不并发跑两次。
+# 说明：Release 触发的组名是 publish-npm-v0.2.1（带 v），手动触发的组名是
+# publish-npm-0.2.1（不带 v），两者不互斥。这没关系：版本守卫会用
+# `npm view` 拦住「同一版本已存在」的第二次运行，所以不会真的重复发布。
+# （GitHub 表达式没有 replace 函数，无法在组名里去掉 v 前缀。）
+concurrency:
+  group: publish-npm-${{ github.event.release.tag_name || inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # 只有主仓库的 Release 才发。fork 仓库发放会失败，这里直接挡掉。
+    if: github.repository == 'dotdance/dsh-skill-scope'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # 版本显式固定：本仓库 package.json 没有 packageManager 字段，
+      # 所以不能省略 version（省略时 action 会因找不到声明而报错）。
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          # 满足包 engines（^22.19.0 || >=24.0.0），同时满足 OIDC 要求的 Node >= 22.14.0。
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          # 官方建议：发布构建不要开缓存，避免拿到被污染的依赖树。
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify the version matches package.json
+        env:
+          # 两个触发源分别取值。判分支用 EVENT_NAME，不用"输入是否为空"，
+          # 因为手动触发时用户留空输入也会得到空字符串，不是未定义。
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          echo "event: $EVENT_NAME"
+          echo "package.json version: $PKG_VERSION"
+
+          if [ "$EVENT_NAME" = "release" ]; then
+            # Release 触发：tag（去掉前缀 v）必须与 package.json 一致。
+            if [ -z "$RELEASE_TAG" ]; then
+              echo "::error::Release 事件里拿不到 tag 名，无法校验版本。"
+              exit 1
+            fi
+            TARGET="${RELEASE_TAG#v}"
+            if [ "$TARGET" != "$PKG_VERSION" ]; then
+              echo "::error::Release tag ($RELEASE_TAG) 与 package.json version ($PKG_VERSION) 不一致。"
+              echo "::error::请把 package.json 的 version 改成 $TARGET 后再发 Release。"
+              exit 1
+            fi
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # 手动触发：必须填版本号，且与 package.json 一致。
+            if [ -z "$INPUT_VERSION" ]; then
+              echo "::error::手动触发时必须填写 version 输入（当前为空）。"
+              exit 1
+            fi
+            if [ "$INPUT_VERSION" != "$PKG_VERSION" ]; then
+              echo "::error::手动输入的版本 ($INPUT_VERSION) 与 package.json ($PKG_VERSION) 不一致。"
+              exit 1
+            fi
+          else
+            echo "::error::未知触发事件：$EVENT_NAME"
+            exit 1
+          fi
+
+          # 版本号在 npm 上已存在时直接失败，避免覆盖/冲突。
+          if npm view "@dotdance/dsh-skill-scope@$PKG_VERSION" version >/dev/null 2>&1; then
+            echo "::error::@dotdance/dsh-skill-scope@$PKG_VERSION 已经存在于 npm，本次不再重复发布。"
+            exit 1
+          fi
+          echo "准备发布版本：$PKG_VERSION"
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test
+        run: pnpm run test
+
+      - name: Build
+        run: pnpm run build
+
+      # lib/ 在 .gitignore 里（仓库不提交构建产物），
+      # 所以这一步必须自检产物体积，防止"空包发布"。
+      - name: Verify build output exists
+        run: |
+          set -euo pipefail
+          for f in lib/index.js lib/client.js; do
+            if [ ! -s "$f" ]; then
+              echo "::error::缺少构建产物 $f（构建失败或输出路径变了）。"
+              exit 1
+            fi
+            echo "$f: $(wc -c < "$f") bytes"
+          done
+
+      # OIDC 模式下 provenance 由 npm 自动生成，**不需要** --provenance 参数。
+      - name: Publish to npm
+        run: npm publish --access public
+
+      - name: Summary
+        run: |
+          {
+            echo "### 已发布 @dotdance/dsh-skill-scope@$(node -p "require('./package.json').version")"
+            echo ""
+            echo "- 触发器：${{ github.event_name }}"
+            echo "- 签名：npm provenance（OIDC 自动生成）"
+          } >> "$GITHUB_STEP_SUMMARY"
