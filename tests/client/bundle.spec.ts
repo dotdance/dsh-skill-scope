@@ -258,14 +258,25 @@ describe('client bundle contract (design 8.2)', () => {
     /*
      * 类名：映射表的值形如 `"p4Fk8G_card"`，取 `_` 之后的那一段。
      *
-     * **哈希段必须是 `[A-Za-z0-9]+`，不能写成 `[a-z0-9]+`**（2026-10-15 实测修正）。
-     * lightningcss 的 `[hash]` 是 **base62 大小写混合**的，本机实测产物给出的是
-     * `p4Fk8G`、`EcQGha` 这类值，含大写 `F`/`G`。写死小写会让这条正则**一个都匹配不到**，
-     * 于是 `defined` 为空、第 180 行断言失败——而失败信息只说「expected 0 to be greater than 0」，
-     * 完全不指向真正的原因（大小写假设错了）。
+     * **哈希段不能假设字符集**（2026-10-17 实测修正，本轮 CI 失败的真因）。
+     * 这个哈希来自 `lightningcss` 的 `[hash]`，而它**取决于构建时的绝对路径**：
+     * 同一份源码换个 checkout 目录就会得到不同的值。实测同一文件：
+     *
+     * | filename | 产物类名 |
+     * | --- | --- |
+     * | `/Users/go/proj/dsh-skill-scope/src/client/styles.module.css` | `p4Fk8G_button` |
+     * | `/home/runner/work/dsh-skill-scope/dsh-skill-scope/...`（CI） | `Jg-IJa_button` |
+     * | `/a/b/styles.module.css` | `_6rKUKa_button` |
+     *
+     * 后两者分别含 **连字符 `-`** 与 **前导下划线 `_`**，写死 `[A-Za-z0-9]+`
+     * 会让这条正则一个都匹配不到，`defined` 为空、下面的断言失败，
+     * 而报错只说「expected 0 to be greater than 0」，完全不指向真正的原因。
+     *
+     * 所以这里不猜字符集：**用非贪婪的 `.+?` 吃到最后一个 `_` 之前**，
+     * 再要求局部名以标识符字符开头。这样任何哈希编码都能匹配。
      */
     const defined = new Set<string>()
-    for (const match of source.matchAll(/"([A-Za-z0-9]+)_([A-Za-z_$][\w$]*)"/g)) {
+    for (const match of source.matchAll(/"(.+?)_([A-Za-z_$][\w$]*)"/g)) {
       if (match[2] !== undefined) defined.add(match[2])
     }
 
