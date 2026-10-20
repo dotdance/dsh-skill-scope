@@ -52,7 +52,8 @@ visible, clickable switches, managed separately at **global** and **per-workspac
 ### 1. The global panel — switch off everything no project needs
 
 Click **Global Skills** in the left sidebar to open a native main-view page listing everything at the
-**global layer**, skills and MCP servers alike. Anything you switch off here **applies to every workspace**, and is a hard ceiling.
+**global layer**, skills and MCP servers alike. Anything you switch off here **is off by default in every workspace**;
+when one project really needs it, that project can switch it back on (see rule 3).
 
 ![Two entry points: Global Skills in the sidebar and Workspace Skills beside the input box](assets/panel-global.png)
 
@@ -70,27 +71,41 @@ In a **new session**, click **Workspace Skills** at the bottom right of the inpu
 
 The panel title states that it affects `default-workspace` only, and the lower part groups items by source: in this example the `.agents` directory contributes 35 of them.
 
-- Items switched off globally **never reach this list at all**, so a shorter list than the global panel is expected, not lost data.
+- This list holds **the same inventory as the global panel**: items switched off globally are here too (with the switch off), and you can switch them on right here.
+- A row that differs from the global setting carries a red **"Differs from global"** tag, so you can see at a glance what this project has changed.
+- Besides **All / Enabled / Disabled**, the view bar has a fourth button, **Differs from global**: it narrows the list to what this project changed, which helps once the inventory gets long.
 - Changes **apply only to new sessions in this project** and affect no other project.
 
-### 3. The key rule: global is a hard ceiling, projects can only narrow further
+### 3. The key rule: global supplies defaults, a project overrides item by item
 
 ```text
       Every skill and MCP server on disk
                 │
                 ▼
       ┌─────────────────────┐
-      │  Global (hard cap)  │   off = no project can use it
+      │  Global (defaults)  │   off = no project uses it by default
       └─────────────────────┘
-                │  what remains
+                │  per item: follow / switch on / switch off
                 ▼
       ┌─────────────────────┐
-      │  Project (narrow)   │   can only switch more off;
-      └─────────────────────┘   cannot re-enable a globally disabled item
+      │  Project (override) │   can switch a global off back on,
+      └─────────────────────┘   and a global on back off
                 │
                 ▼
       The set the model actually sees this turn
 ```
+
+Each item has one of three states in a project. The panel exposes a single control, because
+"follow global" is expressed by **not recording that item**:
+
+| State | Meaning | How the panel shows it |
+| --- | --- | --- |
+| Follow global | This project has no opinion on the item | Switch sits at the global position, no red tag |
+| Switched on here | Off globally, but this project needs it | Switch is on + red tag "Differs from global" |
+| Switched off here | On globally, but this project does not want it | Switch is off + red tag "Differs from global" |
+
+To go back to "follow global", move the switch to the global position: the red tag disappears and the
+record is dropped.
 
 ### Off is not deleted: manual invocation always remains
 

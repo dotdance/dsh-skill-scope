@@ -14,7 +14,13 @@ import { z } from 'zod'
  */
 export type PolicyMode = 'default' | 'blacklist'
 
-/** 一层的策略。全局层与工作区层共用此形状（设计 3.2）。 */
+/**
+ * **全局层**的策略（设计 3.2）。
+ *
+ * 工作区层**不再共用此形状**：它存的是逐项绝对状态（`名字 → 布尔`），
+ * 见 `./workspace-schema.ts`。两层形状分家是「工作区可以打开全局关着的项」
+ * 这条语义变更的直接结果——黑名单数组表达不了「明令开」。
+ */
 export interface LayerPolicy {
   mode: PolicyMode
   skills: string[]
@@ -154,48 +160,13 @@ export function parseGlobalPolicy(text: string | undefined): { policy: LayerPoli
   return normalizePolicy(parsed.raw, 'blacklist')
 }
 
-/**
- * 工作区策略文档 `{ "default": { … } }`。沿用既有文件格式，无需迁移数据。
- * 缺 `default` 行按空策略处理。
- */
-export function parseWorkspacePolicy(text: string | undefined): { policy: LayerPolicy; warning?: string } {
-  if (text === undefined || text.trim() === '') return { policy: EMPTY_POLICY }
-  const parsed = parseJson(text, '工作区策略文件')
-  if (!parsed.ok) return { policy: EMPTY_POLICY, warning: parsed.warning }
-  const raw = parsed.raw
-  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
-    return { policy: EMPTY_POLICY, warning: '工作区策略文件的顶层不是对象，已按空策略处理' }
-  }
-  const row = (raw as Record<string, unknown>)['default']
-  if (row === undefined) return { policy: EMPTY_POLICY }
-  return normalizePolicy(row, 'blacklist')
-}
-
 /** 序列化全局策略：裸对象 + 稳定键序，保证 `sha256(content)` 对同一策略恒定。 */
 export function serializeGlobalPolicy(policy: LayerPolicy): string {
   return `${JSON.stringify(toRows(policy), null, 2)}\n`
 }
 
-/**
- * 序列化工作区策略：**先解析 `previousText` 做底，再覆盖 `default`**，
- * 以保住同目录下其他工具写入的未知顶层键（有测试钉住）。
- * 旧文解析失败时退化为新建 `{}`。
- */
-export function serializeWorkspacePolicy(policy: LayerPolicy, previousText: string | undefined): string {
-  let base: Record<string, unknown> = {}
-  if (previousText !== undefined && previousText.trim() !== '') {
-    try {
-      const parsed: unknown = JSON.parse(previousText)
-      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        base = parsed as Record<string, unknown>
-      }
-    } catch {
-      base = {}
-    }
-  }
-  const out = { ...base, default: toRows(policy) }
-  return `${JSON.stringify(out, null, 2)}\n`
-}
+// 工作区层的解析与序列化**不在这里**：它的文件形状与全局层不同
+// （逐项绝对状态，不是黑名单），见 `./workspace-schema.ts`。
 
 function toRows(policy: LayerPolicy): { mode: PolicyMode; skills: string[]; mcps: string[] } {
   return { mode: policy.mode, skills: SORTED_UNIQUE(policy.skills), mcps: SORTED_UNIQUE(policy.mcps) }

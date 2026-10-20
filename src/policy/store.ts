@@ -5,11 +5,15 @@ import { writeFileAtomic, withFileLock } from '@deepseek-ai/dsh-atomic-write'
 import {
   EMPTY_POLICY,
   parseGlobalPolicy,
-  parseWorkspacePolicy,
   serializeGlobalPolicy,
-  serializeWorkspacePolicy,
   type LayerPolicy,
 } from './schema.ts'
+import {
+  EMPTY_WORKSPACE_POLICY,
+  parseWorkspacePolicy,
+  serializeWorkspacePolicy,
+  type WorkspacePolicy,
+} from './workspace-schema.ts'
 import { globalPolicyPath, workspacePolicyPath } from './paths.ts'
 
 /**
@@ -75,6 +79,18 @@ export interface LoadResult {
   warning?: string
 }
 
+/**
+ * 工作区层的读结果。与 `LoadResult` **分开定义**：工作区层存的不是 `LayerPolicy`，
+ * 而是逐项绝对状态（`名字 → 布尔`），两者不能互相赋值。
+ */
+export interface WorkspaceLoadResult {
+  policy: WorkspacePolicy
+  revision: string | null
+  exists: boolean
+  path: string
+  warning?: string
+}
+
 /** 写结果（设计 3.5）。失败码只有 `stale-revision` 与 `write-failed` 两种。 */
 export type SaveOutcome =
   | { ok: true; revision: string }
@@ -122,17 +138,32 @@ export class PolicyStore {
     return await this.write(path, expected, () => serializeGlobalPolicy(policy))
   }
 
-  async loadWorkspace(cwd: string): Promise<LoadResult & { path: string }> {
+  async loadWorkspace(cwd: string): Promise<WorkspaceLoadResult> {
     const path = workspacePolicyPath(cwd)
     const text = await this.readText(path)
-    if (text === null) return { policy: EMPTY_POLICY, revision: null, exists: false, path }
+    if (text === null) return { policy: EMPTY_WORKSPACE_POLICY, revision: null, exists: false, path }
     const { policy, warning } = parseWorkspacePolicy(text)
     return { policy, revision: sha256Hex(text), exists: true, path, ...(warning === undefined ? {} : { warning }) }
   }
 
-  async saveWorkspace(cwd: string, policy: LayerPolicy, expected: string | null | undefined): Promise<SaveOutcome> {
+  /**
+   * 保存工作区策略。
+   *
+   * 写盘要按全局状态剔除「同向条目」（见设计 3.3 写盘规则），所以**必须**拿到全局策略。
+   * 它在本文件的锁**内部**读取：若在进锁前读，全局策略可能在两者之间变化，筛掉一条
+   * 本来已经异向的条目——那会静默改变用户的配置语义。全局文件的读侧无锁（原子 rename），
+   * 这里不会嵌套同一把锁。
+   */
+  async saveWorkspace(
+    cwd: string,
+    policy: WorkspacePolicy,
+    expected: string | null | undefined,
+  ): Promise<SaveOutcome> {
     const path = workspacePolicyPath(cwd)
-    return await this.write(path, expected, (current) => serializeWorkspacePolicy(policy, current ?? undefined))
+    return await this.write(path, expected, async (current) => {
+      const global = await this.loadGlobal()
+      return serializeWorkspacePolicy(policy, current ?? undefined, global.policy)
+    })
   }
 
   /** 读全文；文件不存在返回 `null`。读侧无锁，见类注释。 */
@@ -153,7 +184,7 @@ export class PolicyStore {
   private async write(
     path: string,
     expected: string | null | undefined,
-    serialize: (currentText: string | null) => string,
+    serialize: (currentText: string | null) => string | Promise<string>,
   ): Promise<SaveOutcome> {
     const previous = this.queues.get(path) ?? Promise.resolve()
     // 队列尾只用来**串行化**，不传递结果：下一个写入者无条件接在上一个之后，
@@ -169,7 +200,7 @@ export class PolicyStore {
   private async writeLocked(
     path: string,
     expected: string | null | undefined,
-    serialize: (currentText: string | null) => string,
+    serialize: (currentText: string | null) => string | Promise<string>,
   ): Promise<SaveOutcome> {
     try {
       // 先确保父目录存在：`withFileLock` 用 `writeFile(lockPath, …)` 加 `wx` 建锁，
@@ -203,7 +234,7 @@ export class PolicyStore {
           }
         }
 
-        const text = serialize(current)
+        const text = await serialize(current)
         await this.fs.writeFile(path, text)
         return { ok: true, revision: sha256Hex(text) }
       })

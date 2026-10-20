@@ -386,6 +386,15 @@
   white-space: nowrap;
 }
 
+/*
+ * 跨层差异标记的外壳（`<span>` 只为给出 `data-testid` 与 `title` 提示）。
+ * 它不自己上色：颜色由里面的宿主 `Tag`（`tone="danger"`）负责，主题与暗色随之统一。
+ */
+.overridden {
+  display: inline-flex;
+  align-items: center;
+}
+
 /* 只读卡不渲染开关；整体前景降一档但保持 AA。 */
 .cardDisabled .cardName {
   color: var(--dsw-alias-label-secondary, currentColor);

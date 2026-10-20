@@ -1,5 +1,7 @@
 import type { LayerPolicy } from '../policy/schema.ts'
 import { validatePolicyInput } from '../policy/schema.ts'
+import type { WorkspacePolicy } from '../policy/workspace-schema.ts'
+import { validateWorkspaceInput } from '../policy/workspace-schema.ts'
 import type { PolicyStore, SaveOutcome } from '../policy/store.ts'
 import type { AgentStates } from '../agent/state.ts'
 import { classifyMcp, type McpRow, type McpToolFace } from '../inventory/mcp.ts'
@@ -82,28 +84,35 @@ export type GlobalValue = {
 }
 
 /**
- * 工作区面板返回体。`live` = 该会话当前是否有 live Agent（有才走实时清单）。
+ * 工作区面板返回体。
  *
- * `disabledGlobally` 与 `inherited` 是**服务端算好的**全局层事实（设计 `docs/design.md` §6.4）。
- * **2026-10-14 之后两个字段都不再驱动任何文字**：MCP 段顶部那句「继承自全局：N 项
- * （全局已关闭 M 项）」与顶部说明段末尾那句「被全局关闭 N 项」都按用户要求删除了。
- * 保留二者的原因是**不改返回体形状**（客户端仍可能按形状校验），不是为了显示。
- * `disabledGlobally` 在客户端**仍被读取**，但只剩一个用途：`toMcpRows` 的 `excludeNames`。
- * **`disabledGlobally` 里的名字不在 `inventory` 里**（已被 `withoutClosed` 整条摘除），
- * 所以它也不是可渲染的行。它是 skill 名与 MCP server 名的并集；
- * 而 `inherited.disabledGlobally` 是 `policy.mcps` 的长度，只数 MCP ——
- * `inherited` 那侧的 `total` 同样只数 MCP（见 `buildWorkspaceView`）。
- * 二者都是可选的：客户端缺 `disabledGlobally` 时退回 `[]`，宁可让一条本该摘除的 MCP
- * 照常显示（可见的过度授予），也不要凭空摘掉用户自己配的项（静默失效更糟），
- * 所以**服务端仍必须填**。
+ * **不再沿用 `GlobalValue` 的形状**：三态语义下，这个面板要同时回答三个问题——
+ * 「全局怎么算的」「本工程怎么算的」「两项是否不同」。所以它带**两份策略**：
+ *
+ * - `global`：全局层（黑名单）。只读用途——客户端据此判断「这一项是否与全局不同」。
+ * - `workspace`：本工程的决定（`名字 → 布尔`）。键不存在 = 跟随全局。
+ *
+ * 最终状态由客户端按 `workspace[name] ?? !global.includes(name)` 算出，
+ * 与服务端 `openResolver` 同一公式（见 `src/policy/evaluate.ts`）。
+ *
+ * `revision` 是**工作区文件**的 revision（保存时的期望值），不是全局的。
+ *
+ * 旧字段 `disabledGlobally` / `inherited` 已删除：它们唯一的用途是把全局关闭项
+ * 从清单里摘掉，而三态方案下**没有任何项会被摘掉**——全局关掉的东西必须留在
+ * 面板上，否则用户没有入口把它打开。
  */
-export type WorkspaceValue = GlobalValue & {
+export type WorkspaceValue = {
+  /** 全局层策略（黑名单），供客户端判断「与全局不同」。 */
+  global: LayerPolicy
+  /** 本工程的决定：键不存在表示跟随全局。 */
+  workspace: WorkspacePolicy
+  /** 工作区策略文件的 `sha256`；`null` 表示文件不存在。 */
+  revision: string | null
   cwd: string
   policyPath: string
   exists: boolean
   live: boolean
-  disabledGlobally?: string[]
-  inherited?: { total: number; disabledGlobally: number }
+  inventory: { skills: GroupedSkillRow[]; mcps: McpRow[] }
 }
 
 /**
@@ -265,35 +274,17 @@ export async function handleGlobalSave(body: unknown, deps: RouteDeps): Promise<
 /**
  * `POST /api/skill-scope/workspace`：某会话的工作区策略 + 该会话的清单。
  *
- * **清单起点是「全局未关闭的项」，不是「Agent 当前可见的项」**。
+ * **清单是全量并集，不再按全局状态摘除任何行**（三态方案的直接结果）：
+ * 全局从「硬上限」退化为「默认值」，被全局关掉的项必须仍然列在这里，
+ * 否则用户就没有入口把它在工作区打开。
  *
- * 为什么不能用 Agent 可见清单：关掉一个 skill 的手段**就是**把它遮蔽成不可见
- * （`applySkillShadow` 注册一份 `modelInvocable:false` 的副本）。于是
- * `readAgentSkills` 返回的 rows 里**天然不含已被本工作区关闭的项**——
- * 用「可见集」当清单，等于用「关掉的结果」当「关掉的依据」，自己把自己的记账本撕了。
- * 后果：**只有本工作区关闭、全局放行**的项在面板上完全消失，用户既看不到、也没有入口
- * 把它们打开（实测 chat 工作区：16 项全局放行项里只剩 2 项，漏 13 项）。
+ * 这与旧实现相反。旧实现有三条组装规则（全局未关闭 / Agent 可见 / 本工作区已关闭
+ * 但全局未关闭），起点是「全局未关闭」，全局关掉的整条摘除。那套规则在
+ * 「工作区只能收窄」的年代是自洽的，但换成三态后每一条都会把可选项删掉。
  *
- * 现在的组装规则（三条并集，用户逐条确认）：
- * 1. **全局未关闭**（`global.policy.skills` 之外）—— 全局层是硬上限，被它关掉的整条摘除。
- * 2. **Agent 可见**（`readAgentSkills`）—— 即当前未被本工作区关闭的项，标「已启用」。
- * 3. **本工作区已关闭、但全局未关闭**（本路由从磁盘策略补回）—— 标「已禁用」。
- *
- * 第 3 条是本次修复的核心：这些名字**不在**第 2 条里（被遮蔽了），必须显式补回来。
- * 它们只补「全局放行」的（第 1 条的约束）；全局已关闭的仍整条摘除，不进第 3 条。
- *
- * **`modelInvocable === false` 的项不过滤**：
- * 这类 skill 的 frontmatter 写了 `disable-model-invocation: true`（「只给用户手动调用」），
- * 面板照样列出，靠行内状态标注「不可被模型调用」区分。理由是**授权**与**AI 能否调用**
- * 是两件事：前者是用户在本面板的决定，后者是 skill 作者的声明，混在一起会让
- * 「我关了它」和「它本来就不能给 AI 用」看起来一样。
- * （历史：本路由曾用 `invocableOnly` 过滤，那是把「AI 能否调用」当成了「要不要展示」。）
- *
- * **全局层是硬上限**（设计 `docs/design.md` §1.2）：全局已关闭的名字从工作区清单里
- * **整条摘除**（用户明确要求「完全不显示」），而不是折叠展示。同时把名单放进
- * 同时把名单放进 `disabledGlobally` 供客户端摘行（它不再用于任何说明文字）。
- * 少了这层减法，用户在全局面板关掉的能力会在工作区面板里原样出现，
- * 表现为「全局关闭了大部分 skill，工作区还是能看到」。
+ * `modelInvocable === false` 的项仍然不过滤：这类 skill 的 frontmatter 写了
+ * `disable-model-invocation: true`（「只给用户手动调用」），面板照样列出，
+ * 靠行内标注区分。理由是**授权**与「AI 能否调用」是两件事。
  *
  * **组装工作全部委托给 `buildWorkspaceView`**：本函数只负责解析会话与拒绝未知会话。
  * 保存路由共用同一个函数，因此两条路由的清单口径不存在分叉的可能。
@@ -302,127 +293,79 @@ export async function handleWorkspace(body: unknown, deps: RouteDeps): Promise<E
   try {
     const resolved = await resolveWorkspaceSession(deps, asRecord(body))
     if (!resolved.ok) return { ok: false, error: resolved.error }
-    return { ok: true, value: await buildWorkspaceView(deps, resolved.view, resolved.sessionId) }
+    return { ok: true, value: await buildWorkspaceView(deps, resolved.view) }
   } catch (error) {
     return internal(error)
   }
 }
 
 /**
- * 工作区面板的 Skill 清单组装（本路由与 `handleWorkspaceSave` 共用，口径不许分叉）。
+ * 工作区面板的 Skill 清单：**全局清单 ∪ 会话可见清单**。
  *
- * 输入三份事实：
- * - `visible`：Agent 作用域的活清单（未被本工作区关闭的项在这里）。
- * - `workspacePolicy`：本工作区的策略（名单里的项被本工作区关闭）。
- * - `global`：全局清单（提供被关闭项的**行数据**）。
- * - `closedGlobally`：全局策略关闭的名字，**硬上限**。
+ * 这是一个真实缺陷的修复，不是重构顺带的整理。
  *
- * 输出 = **全局未关闭** ∩（**Agent 可见** ∪ **本工作区已关闭**）。
+ * 旧实现以 `readGlobalSkills` 为起点。它读的是**全局注册表**，而 `browser-skill`
+ * 这类能力是 Agent 启动时**自注册**的——它不在全局注册表里，只出现在会话作用域的
+ * 清单中。于是它从一开始就不在面板上：用户想为某个工程单独打开它，找不到入口。
+ * 旧实现之所以没暴露这个问题，是因为当年工作区**只能收窄**，面板上「看不到」与
+ * 「不能开」是一回事；三态下「能不能开」成了用户要回答的问题，缺行就是缺功能。
  *
- * 「本工作区已关闭」的名字要从全局清单里**取回行数据**（描述、来源、分组），
- * 因为它们在 `visible` 里根本不存在——被遮蔽了（见 `handleWorkspace` 的注释）。
- * 全局清单里也找不到的名字（skill 已被删除、provider 掉线）就跳过：没有行数据可渲染，
- * 硬塞一个空壳行会让用户看到一个点不动的开关。
+ * 所以清单必须取并集：
+ * - `readGlobalSkills`：全局注册表全量行（提供描述、来源、分组等行数据）；
+ * - `readAgentSkills`：会话作用域的活清单（补上自注册项）。
  *
- * `complete` 取 `visible` 的：残缺时 UI 要拒绝收窄写入（`SkillInventory.complete` 的契约）。
- * 补回的行不改变完整性——它们是策略里的名字，不是清单发现的结果。
+ * 去重按 `name`，同名时**以全局行为准**（来源信息更完整），会话侧只补缺。
+ * `complete` 取两者之**与**：两份清单都完整，并集才完整；任一残缺时 UI 按既有
+ * 契约拒绝收窄写入。
  */
-function composeWorkspaceSkills(
-  visible: SkillInventory,
-  workspacePolicy: LayerPolicy,
-  global: SkillInventory,
-  closedGlobally: readonly string[],
-): SkillInventory {
-  const blocked = new Set(closedGlobally)
-  const byName = new Map(global.rows.map((row) => [row.name, row]))
-  const present = new Set(visible.rows.map((row) => row.name))
-  const restored: SkillRow[] = []
-  for (const name of workspacePolicy.skills) {
-    if (present.has(name)) continue
-    if (blocked.has(name)) continue
-    const row = byName.get(name)
-    if (row === undefined) continue
-    restored.push(row)
-  }
-  return {
-    rows: [...visible.rows, ...restored].filter((row) => !blocked.has(row.name)),
-    complete: visible.complete,
-  }
-}
-
-/**
- * 全局策略关掉了哪些名字（设计 3.1 的生效集语义）。
- *
- * 只有一种语义：**名单里的就是被关掉的**。
- * 于是「全局关了 N 项」永远可枚举，工作区层能精确摘除，不再有
- * 「白名单下无法枚举未出现的名字、只能显示空集合」那个保守的缺口。
- *
- * 因此 `LayerPolicy` 的两份名单**本身就是**关闭集，调用方直接读 `policy.skills` /
- * `policy.mcps`，不需要一层再包一次的同形对象。
- */
-
-/** 摘掉名字落在 `closed` 里的行；`closed` 为空时原样返回（避免无谓的数组复制）。 */
-function withoutClosed<T>(rows: readonly T[], closed: readonly string[], nameOf: (row: T) => string): T[] {
-  if (closed.length === 0) return [...rows]
-  const blocked = new Set(closed)
-  return rows.filter((row) => !blocked.has(nameOf(row)))
+async function readWorkspaceSkills(
+  deps: RouteDeps,
+  view: SessionView,
+  cwd: string,
+): Promise<SkillInventory> {
+  const global = await readGlobalSkills(deps.skills)
+  if (view.agent === null) return global
+  const scoped = await readAgentSkills(deps.skills, view.agent, cwd)
+  const present = new Set(global.rows.map((row) => row.name))
+  const extra = scoped.rows.filter((row) => !present.has(row.name))
+  return { rows: [...global.rows, ...extra], complete: global.complete && scoped.complete }
 }
 
 /**
  * **工作区视图的唯一组装口径**（读取路由与保存路由共用，调用方不许各自再拼一遍）。
  *
- * 抽出来的理由不只是「少写几行」：这段逻辑原先在 `handleWorkspace` 与
- * `handleWorkspaceSave` 里**逐段复制了两份**（9 步相同），而它的正确性依赖
- * 「两条路由的组装口径完全一致」。两份副本已经造成过一次用户可见的缺陷
- * （见下方 `composeWorkspaceSkills` 调用点的历史注释），所以这里把它收敛成一处：
- * 只要这个函数是对的，两条路由就都是对的。
+ * 抽出来的理由不只是「少写几行」：这段逻辑原先在两条路由里**逐段复制了两份**，
+ * 而它的正确性依赖「两条路由的组装口径完全一致」。两份副本已经造成过一次用户可见的
+ * 缺陷，所以这里收敛成一处：只要这个函数是对的，两条路由就都是对的。
  *
  * 顺序要求（**步骤顺序是逻辑，不是风格**）：
- * 1. 先读工作区策略与 agent 作用域清单（`scopedSkills`）——后者的作用域**必须传会话
- *    解析出的 agent 本体**，替换对象会让 `dsh-scope` 按身份查不到层、静默退化成全局层。
- * 2. 读全局清单与全局策略。全局策略是**硬上限**：被它关掉的名字要整条摘除，
- *    而不是折叠展示（用户明确要求「完全不显示」）。
- * 3. 组装 skill 清单（`composeWorkspaceSkills`）。
- * 4. 摘除全局关闭项（skill 按 `name`、MCP 按 `serverName`）。
- * 5. **摘除之后**才算 `inherited.total`——它必须等于实际列给用户的继承项数量，
- *    否则「继承自全局：2 项（全局已关闭 1 项）」会在只有 1 行时自相矛盾。
+ * 1. 先读工作区策略与作用域清单——后者的作用域**必须传会话解析出的 agent 本体**，
+ *    替换对象会让 `dsh-scope` 按身份查不到层、静默退化成全局层。
+ * 2. 再读全局策略与全局清单。它们不再用来「摘除」任何行，只提供两件事：
+ *    ①三态里「跟随全局」的取值来源（`global` 字段）②清单并集的基底。
+ * 3. 组装 skill 清单与 MCP 清单——**两者都不排除任何项**。
  *
  * 调用方（保存路由）必须在调用本函数**之前**完成写盘与 `reapplyAfterSave`：
  * 本函数只读，不负责落地。
  */
-async function buildWorkspaceView(
-  deps: RouteDeps,
-  view: SessionView,
-  sessionId: string,
-): Promise<WorkspaceValue> {
+async function buildWorkspaceView(deps: RouteDeps, view: SessionView): Promise<WorkspaceValue> {
   const cwd = view.cwd
   const loaded = await deps.store.loadWorkspace(cwd)
-  const scopedSkills =
-    view.agent === null ? await readGlobalSkills(deps.skills) : await readAgentSkills(deps.skills, view.agent, cwd)
-  // 全局策略是硬上限：先读它，再把已关闭的名字从可见面里摘出去。
-  const globalPolicy = (await deps.store.loadGlobal()).policy
-  // skill 侧的全局关闭项由 `composeWorkspaceSkills` 在内部整条摘除（它同时要拦下
-  // 补回的被关闭项），所以这里**不再**对它叠一层 `withoutClosed`。
-  const liveSkills: SkillInventory = composeWorkspaceSkills(
-    scopedSkills,
-    loaded.policy,
-    await readGlobalSkills(deps.skills),
-    globalPolicy.skills,
-  )
-  const visibleMcps = withoutClosed(await readMcpRows(deps), globalPolicy.mcps, (row) => row.serverName)
+  // 读取期的 warning（旧格式并存、字段被回退）不当错误：记一条日志，面板照常打开。
+  if (loaded.warning !== undefined) deps.logger.warn(`dsh-skill-scope: ${loaded.warning}（${loaded.path}）`)
+  const global = await deps.store.loadGlobal()
+  const skills = await readWorkspaceSkills(deps, view, cwd)
   return {
-    ...toGlobalValue(loaded, {
-      skills: withGroups(liveSkills.rows),
-      mcps: visibleMcps,
-    }),
+    global: global.policy,
+    workspace: loaded.policy,
+    revision: loaded.revision,
     cwd,
     policyPath: loaded.path,
     exists: loaded.exists,
     live: view.live,
-    disabledGlobally: [...globalPolicy.skills, ...globalPolicy.mcps],
-    inherited: {
-      total: visibleMcps.filter((row) => row.source === 'global').length,
-      disabledGlobally: globalPolicy.mcps.length,
+    inventory: {
+      skills: withGroups(skills.rows),
+      mcps: await readMcpRows(deps),
     },
   }
 }
@@ -431,15 +374,18 @@ async function buildWorkspaceView(
  * `POST /api/skill-scope/workspace/save`：写入某会话的工作区策略。
  * 与全局保存同形，只是换到 `saveWorkspace(cwd, …)`，并且必须先从会话解析出 cwd。
  *
- * **组装与读取路由共用 `buildWorkspaceView`**（不再各自复制一份口径），
- * 本函数只保留真正属于「保存」的三步：校验入参 → 写盘 → 重新落地 → 回读。
+ * 入参是 `payload.workspace`（`{ skills: {名字: 布尔}, mcps: {...} }`），
+ * 不是全局那套 `{ mode, skills[], mcps[] }`——两层形状已分家，混用会在校验处被拒。
+ *
+ * **组装与读取路由共用 `buildWorkspaceView`**，本函数只保留属于「保存」的三步：
+ * 校验入参 → 写盘 → 重新落地 → 回读。
  */
 export async function handleWorkspaceSave(body: unknown, deps: RouteDeps): Promise<Envelope<WorkspaceValue>> {
   try {
     const payload = asRecord(body)
     const resolved = await resolveWorkspaceSession(deps, payload)
     if (!resolved.ok) return { ok: false, error: resolved.error }
-    const validated = validatePolicyInput(payload)
+    const validated = validateWorkspaceInput(payload?.['workspace'])
     if (!validated.ok) {
       return { ok: false, error: { code: 'bad-request', message: validated.message } }
     }
@@ -449,7 +395,7 @@ export async function handleWorkspaceSave(body: unknown, deps: RouteDeps): Promi
     // `tools/change`，这条显式调用是「同一会话内改策略立即生效」的唯一来源。
     // 放在回读之前无副作用（回读读磁盘），但让「写入 → 落地 → 回读」同处一条 try。
     await deps.reapplyAfterSave()
-    return { ok: true, value: await buildWorkspaceView(deps, resolved.view, resolved.sessionId) }
+    return { ok: true, value: await buildWorkspaceView(deps, resolved.view) }
   } catch (error) {
     return internal(error)
   }

@@ -3,9 +3,7 @@ import {
   EMPTY_POLICY,
   normalizePolicy,
   parseGlobalPolicy,
-  parseWorkspacePolicy,
   serializeGlobalPolicy,
-  serializeWorkspacePolicy,
   validatePolicyInput,
 } from '../../src/policy/schema.ts'
 
@@ -21,27 +19,11 @@ describe('normalizePolicy（宽松读）', () => {
     expect(r.warning).toBeTruthy()
   })
 
-  it('reads the workspace document from its "default" row', () => {
-    expect(
-      parseWorkspacePolicy('{"default":{"mode":"blacklist","skills":["md-word-count"],"mcps":[]}}').policy,
-    ).toEqual({ mode: 'blacklist', skills: ['md-word-count'], mcps: [] })
-  })
-
   it('deduplicates and sorts on serialize', () => {
     expect(JSON.parse(serializeGlobalPolicy({ mode: 'blacklist', skills: ['b', 'a', 'a'], mcps: [] })).skills).toEqual([
       'a',
       'b',
     ])
-  })
-
-  it('keeps unknown top-level keys when rewriting the workspace document', () => {
-    const out = JSON.parse(
-      serializeWorkspacePolicy(
-        { mode: 'blacklist', skills: [], mcps: [] },
-        '{"note":"keep me","default":{"mode":"default","skills":[],"mcps":[]}}',
-      ),
-    )
-    expect(out.note).toBe('keep me')
   })
 
   it('rejects an illegal name with the offending name in the message', () => {

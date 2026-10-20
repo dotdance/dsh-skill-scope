@@ -212,14 +212,14 @@ describe('工作区策略', () => {
   })
 
   it('loads from the workspace path and reports it', async () => {
-    // 落盘上的 `whitelist` 是被删除的历史取值：读取时归一到 `blacklist`，
-    // 名单原样保留。这条用例现在同时是「废弃模式迁移」的回归守卫。
+    // 旧格式：`default` 行 + 数组。数组元素一律读成 `false`（「关」）。
+    // `mode` 不再参与——工作区层现在存的是逐项绝对状态，没有模式可言。
     const { store } = makeStore({
       [workspacePolicyPath(cwd)]: '{"default":{"mode":"whitelist","skills":["a"],"mcps":[]}}',
     })
     const r = await store.loadWorkspace(cwd)
     expect(r.path).toBe(workspacePolicyPath(cwd))
-    expect(r.policy).toEqual({ mode: 'blacklist', skills: ['a'], mcps: [] })
+    expect(r.policy).toEqual({ skills: { a: false }, mcps: {} })
   })
 
   it('keeps unknown top-level keys when saving the workspace policy', async () => {
@@ -227,8 +227,20 @@ describe('工作区策略', () => {
       [workspacePolicyPath(cwd)]: '{"note":"keep me","default":{"mode":"default","skills":[],"mcps":[]}}',
     })
     const loaded = await store.loadWorkspace(cwd)
-    const outcome = await store.saveWorkspace(cwd, { mode: 'blacklist', skills: ['a'], mcps: [] }, loaded.revision)
+    const outcome = await store.saveWorkspace(cwd, { skills: { a: false }, mcps: {} }, loaded.revision)
     expect(outcome.ok).toBe(true)
     expect(JSON.parse(files.get(workspacePolicyPath(cwd))!).note).toBe('keep me')
+  })
+
+  it('drops entries that agree with the global layer when saving', async () => {
+    // 写盘按**全局当前状态**剔除同向条目。全局在锁内读取，才不会在两次读之间漂移。
+    const { store, files } = makeStore({
+      [globalPolicyPath()]: serializeGlobalPolicy({ mode: 'blacklist', skills: ['a'], mcps: [] }),
+    })
+    const outcome = await store.saveWorkspace(cwd, { skills: { a: false, b: false }, mcps: {} }, null)
+    expect(outcome.ok).toBe(true)
+    const written = JSON.parse(files.get(workspacePolicyPath(cwd))!)
+    // a 全局已关 ⇒ false 与全局同向 ⇒ 不写；b 全局开着 ⇒ false 是真实差异 ⇒ 写。
+    expect(written.workspace.skills).toEqual({ b: false })
   })
 })
