@@ -264,7 +264,7 @@ describe('client bundle contract (design 8.2)', () => {
      *
      * | filename | 产物类名 |
      * | --- | --- |
-     * | `/Users/go/proj/dsh-skill-scope/src/client/styles.module.css` | `p4Fk8G_button` |
+     * | `/home/user/proj/dsh-skill-scope/src/client/styles.module.css` | `p4Fk8G_button` |
      * | `/home/runner/work/dsh-skill-scope/dsh-skill-scope/...`（CI） | `Jg-IJa_button` |
      * | `/a/b/styles.module.css` | `_6rKUKa_button` |
      *

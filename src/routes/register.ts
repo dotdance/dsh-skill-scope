@@ -1,7 +1,7 @@
 import type { RouteDeps, Envelope } from './handlers.ts'
 import { handleGlobal, handleGlobalSave, handleWorkspace, handleWorkspaceSave } from './handlers.ts'
 import type { PluginContextLike } from './session.ts'
-import { asRecord } from '../shared/unknown.ts'
+import { API_PATH } from '../shared/routes.ts'
 
 /**
  * 乐观的精确路由注册面。
@@ -32,13 +32,14 @@ export interface FetchRegisterFace {
   register(spec: FetchRouteSpec): () => unknown
 }
 
-/** 我们自己拥有的四条路由（设计 6.2）。**含 `/api` 前缀**（见 FetchRouteSpec 的 path 说明）。
+/** 我们自己拥有的四条路由（设计 6.2）。路径段来自 `src/shared/routes.ts`，这里补前导斜杠，
+ * 因为宿主按完整 pathname 匹配（见 FetchRouteSpec 的 path 说明）。
  * **只有 POST**：非 POST 由宿主落到 404，不实现 405。 */
 export const ROUTES = {
-  global: '/api/skill-scope/global',
-  globalSave: '/api/skill-scope/global/save',
-  workspace: '/api/skill-scope/workspace',
-  workspaceSave: '/api/skill-scope/workspace/save',
+  global: `/${API_PATH.global}`,
+  globalSave: `/${API_PATH.globalSave}`,
+  workspace: `/${API_PATH.workspace}`,
+  workspaceSave: `/${API_PATH.workspaceSave}`,
 } as const
 
 /**

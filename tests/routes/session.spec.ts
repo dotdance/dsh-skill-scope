@@ -6,7 +6,7 @@ import { makeFakeCtx } from '../support/fake-ctx.ts'
 const liveAgent = {
   id: 's1',
   ctx: { get: () => undefined },
-  session: { id: 's1', header: { cwd: '/Users/go/proj/demo' } },
+  session: { id: 's1', header: { cwd: '/home/user/proj/demo' } },
 }
 
 /**
@@ -30,7 +30,7 @@ function makeCtx(options: {
 }): { ctx: PluginContextLike; disposed: () => boolean } {
   let observationDisposed = false
   const observation = {
-    header: options.header ?? { cwd: '/Users/go/proj/demo' },
+    header: options.header ?? { cwd: '/home/user/proj/demo' },
     projections: { values: { agentPreset: 'standard' } },
   } as Record<string, unknown>
   // 用 defineProperty 而非展开：额外字段可能带 getter（「读取时抛错」用例），
@@ -90,7 +90,7 @@ describe('resolveSession', () => {
   it('resolves cwd and preset through sessionQuery, then prefers the live agent', async () => {
     const { ctx } = makeCtx({ agent: liveAgent })
     expect(await resolveSession(ctx, 's1')).toMatchObject({
-      cwd: '/Users/go/proj/demo',
+      cwd: '/home/user/proj/demo',
       agentPreset: 'standard',
       live: true,
     })
@@ -135,13 +135,13 @@ describe('resolveSession', () => {
       },
     })
     const view = await resolveSession(ctx, 's1')
-    expect(view).toMatchObject({ cwd: '/Users/go/proj/demo', agentPreset: null, live: true })
+    expect(view).toMatchObject({ cwd: '/home/user/proj/demo', agentPreset: null, live: true })
     expect(disposed()).toBe(true)
   })
 
   it('falls back to the agent cwd when the header carries none', async () => {
     const { ctx } = makeCtx({ agent: liveAgent, header: {} })
-    expect(await resolveSession(ctx, 's1')).toMatchObject({ cwd: '/Users/go/proj/demo', live: true })
+    expect(await resolveSession(ctx, 's1')).toMatchObject({ cwd: '/home/user/proj/demo', live: true })
   })
 
   it('awaits observeSession instead of treating its Promise as an observation', async () => {
@@ -149,10 +149,10 @@ describe('resolveSession', () => {
     // `asRecord(promise)` 会把 Promise 当成普通对象收下（Promise 是非数组对象，
     // 能过类型判定），于是 `observed=true` 但 `cwd` 恒为 `null`。
     // 真实的「已持久化但当前不 live」的会话就因此被误判成 `unknown-session`。
-    const { ctx } = makeCtx({ agent: undefined, header: { cwd: '/Users/go/proj/demo' } })
+    const { ctx } = makeCtx({ agent: undefined, header: { cwd: '/home/user/proj/demo' } })
     const view = await resolveSession(ctx, 's1')
     expect(view).not.toBeNull()
-    expect(view?.cwd).toBe('/Users/go/proj/demo')
+    expect(view?.cwd).toBe('/home/user/proj/demo')
     expect(view?.live).toBe(false)
   })
 

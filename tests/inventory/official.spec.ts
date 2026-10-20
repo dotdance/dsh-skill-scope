@@ -6,7 +6,7 @@ import { isOfficialSkillPath } from '../../src/inventory/official.ts'
  * **不是**手捏的字面量——含 pnpm 版本目录与哈希。
  */
 const REAL_PNPM_PATH =
-  '/Users/go/Library/pnpm/global/v11/5bd1-18dcdf5fdc96fa80-0/node_modules/.pnpm/' +
+  '/home/user/Library/pnpm/global/v11/5bd1-18dcdf5fdc96fa80-0/node_modules/.pnpm/' +
   '@deepseek-ai+dsh-agent-preset@0.2.1-alpha.2_@deepseek-ai+cordis-plugin-loader@1.0.6-alp_6be3b213f89423fda16ba09f3790f3ac/' +
   'node_modules/@deepseek-ai/dsh-agent-preset/skills/agent-experience/SKILL.md'
 
@@ -18,13 +18,13 @@ describe('isOfficialSkillPath', () => {
   it('recognizes the profile symlink copy (same rule, no pnpm segment)', () => {
     // 软链副本：`realpath` 会解析回 pnpm store，但规则本身也不该依赖那一段。
     expect(
-      isOfficialSkillPath('/Users/go/.dsh/profiles/probe1/node_modules/@deepseek-ai/dsh-agent-preset/skills/agent-experience/SKILL.md'),
+      isOfficialSkillPath('/home/user/.dsh/profiles/probe1/node_modules/@deepseek-ai/dsh-agent-preset/skills/agent-experience/SKILL.md'),
     ).toBe(true)
   })
 
   it('recognizes the skill directory form, which carries no SKILL.md suffix', () => {
     expect(
-      isOfficialSkillPath('/Users/go/node_modules/@deepseek-ai/dsh-agent-preset/skills/editing-cordis-compositions'),
+      isOfficialSkillPath('/home/user/node_modules/@deepseek-ai/dsh-agent-preset/skills/editing-cordis-compositions'),
     ).toBe(true)
   })
 
@@ -56,9 +56,9 @@ describe('isOfficialSkillPath', () => {
      * 这三条是用户磁盘上的真实根目录，必须全部放行。
      */
     for (const path of [
-      '/Users/go/proj/sand/skills/academic-verify/SKILL.md',
-      '/Users/go/node_modules/gbrain/skills/academic-verify/SKILL.md',
-      '/Users/go/.agents/skills/agent-reach/SKILL.md',
+      '/home/user/proj/sand/skills/academic-verify/SKILL.md',
+      '/home/user/node_modules/gbrain/skills/academic-verify/SKILL.md',
+      '/home/user/.agents/skills/agent-reach/SKILL.md',
     ]) {
       expect(isOfficialSkillPath(path)).toBe(false)
     }
@@ -79,11 +79,11 @@ describe('isOfficialSkillPath', () => {
      * 那时应连同 `src/inventory/official.ts` 的注释一起改——这正是它存在的目的。
      */
     it('hides a user’s own skill placed under a @deepseek-ai directory', () => {
-      expect(isOfficialSkillPath('/Users/go/proj/sand/@deepseek-ai/my-own/SKILL.md')).toBe(true)
+      expect(isOfficialSkillPath('/home/user/proj/sand/@deepseek-ai/my-own/SKILL.md')).toBe(true)
     })
 
     it('hides a user’s own skill whose project name merely contains the scope string', () => {
-      expect(isOfficialSkillPath('/Users/go/proj/@deepseek-ai-tools/skills/x/SKILL.md')).toBe(true)
+      expect(isOfficialSkillPath('/home/user/proj/@deepseek-ai-tools/skills/x/SKILL.md')).toBe(true)
     })
   })
 })

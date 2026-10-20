@@ -3,7 +3,7 @@
 - 文档版本：v1.7
 - 日期：2026-10-12（v1.7 修订于 2026-10-13）
 - 基准：DSH `0.2.1-alpha.2`（`@deepseek-ai/cordis` `4.0.5-alpha.1`）
-- 目标仓库：`/Users/go/proj/dsh-skill-scope`
+- 目标仓库：本仓库（相对路径 `.`）
 - 状态：设计方向已与用户确认；本文件是实施计划的输入。实现已完成，当前代码以本文件的机制与不变量为准。
 - 修订历史见 13 节。本节只记录**当前**口径，不再复述各版本的编辑过程。
 
@@ -644,7 +644,7 @@ window.__ModuleLoader__.load({
 
 ## 12. 参考
 
-包根（下称 `<PKG>`）：`/Users/go/Library/pnpm/global/v11/5bd1-18dcdf5fdc96fa80-0/node_modules/.pnpm/<storeDir>/node_modules/@deepseek-ai/<name>`；已安装的第三方插件在 `~/.dsh/profiles/web/node_modules/`。
+包根（下称 `<PKG>`）：`~/Library/pnpm/global/v11/5bd1-18dcdf5fdc96fa80-0/node_modules/.pnpm/<storeDir>/node_modules/@deepseek-ai/<name>`；已安装的第三方插件在 `~/.dsh/profiles/web/node_modules/`。
 
 | 结论 | 引用 |
 | --- | --- |
@@ -713,7 +713,7 @@ window.__ModuleLoader__.load({
 | `ConnectionFetchMethod = 'GET' | 'HEAD' | 'POST'`；`ConnectionRequestBodyMode = 'buffered' | 'streaming'` | `dsh-tool-cordis/lib/types/api-catalog.js`，类型 `ConnectionFetchMethod` / `ConnectionRequestBodyMode` |
 | 连接分发器对未注册路径/方法**先回 404**（不会走到插件 handler） | `<PKG>/dsh-client-connection/lib/index.js:664-676` |
 
-本机环境事实：DSH `0.2.1-alpha.2`；`~/.dsh/profiles/web` 已装 13 个第三方包；`cordis.patch.yml:430-431` 为 `skill-filesystem` 配了 `customSkillDirs`（`/Users/go/proj/sand/skills`、`/Users/go/node_modules/gbrain/skills`），这就是 4.1 里 `custom` 行的来源。
+本机环境事实：DSH `0.2.1-alpha.2`；`~/.dsh/profiles/web` 已装 13 个第三方包；`cordis.patch.yml:430-431` 为 `skill-filesystem` 配了 `customSkillDirs`（`~/proj/sand/skills`、`~/node_modules/gbrain/skills`），这就是 4.1 里 `custom` 行的来源。
 
 > 注意口径：本节的「13 个第三方包」与 3.5 的「12 个 `.dsh-scope.json`」是两件不同的事——前者是 `~/.dsh/profiles/web` 的已装依赖数，后者是本机工程目录里已存在的策略文件数。两者数值恰好相近，阅读时不要混用。
 
@@ -874,7 +874,7 @@ D3 让「工作区层」在求值时**被静默丢弃**。D3 尤其隐蔽：它�
 口径不许分叉。入选集合 = **全局未关闭 ∩（Agent 可见 ∪ 本工作区已关闭）**。
 `invocableOnly` 已无调用者，连同导入一并删除。
 
-实测（probe1 / 3095，cwd=`/Users/go/proj/chat`）：面板 **2 → 16** 条；
+实测（probe1 / 3095，cwd=`~/proj/chat`）：面板 **2 → 16** 条；
 `面板 ∩ 全局黑名单 = 0`（不误放被全局关闭的项）；补回的 13 行都带完整字段
 （`source` / `provider` / `group`）。往返验证：移除 `agent-reach` → 保存 → 仍然 16 条且磁盘已持久化。
 

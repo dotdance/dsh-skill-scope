@@ -489,7 +489,6 @@
  * 详情行里的「来源」值：插件名或**磁盘注册根的绝对路径**。
  *
  * 与 `.detailValue` 分开是因为取值形状不同：路径很长（实测
- * `/Users/go/node_modules/gbrain/skills` 有 38 字符），必须能任意位置断行，
  * 否则在 760px 的工作区弹层里会把详情行横向撑出去。
  *
  * 用**等宽字体**：路径里 `l/1`、`O/0` 靠比例字体很难分辨，而用户会照着它
@@ -607,22 +606,6 @@
   opacity: 0.5;
 }
 
-/* 数量文字（沿用旧类名，供既有调用点过渡）。 */
-.count {
-  font-size: 13px;
-  color: var(--dsw-alias-label-secondary, currentColor);
-}
-
-.badge {
-  display: inline-block;
-  padding: 1px 6px;
-  border-radius: 999px;
-  border: 1px solid var(--dsw-alias-border-l3, currentColor);
-  font-size: 11px;
-  color: var(--dsw-alias-label-secondary, currentColor);
-  white-space: nowrap;
-}
-
 .alert {
   display: flex;
   align-items: center;
@@ -687,43 +670,6 @@
 .button:disabled {
   cursor: not-allowed;
   opacity: 0.5;
-}
-
-/* 被全局关闭的名单：默认折叠的只读区。 */
-.details {
-  border: 1px solid var(--dsw-alias-border-l2, currentColor);
-  border-radius: 8px;
-  padding: 8px 10px;
-  font-size: 12px;
-}
-
-.detailsSummary {
-  cursor: pointer;
-  color: var(--dsw-alias-label-secondary, currentColor);
-}
-
-.detailsList {
-  margin: 8px 0 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.detailsRow {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  min-width: 0;
-}
-
-.detailsName {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .empty {

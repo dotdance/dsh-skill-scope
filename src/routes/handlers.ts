@@ -162,18 +162,6 @@ async function readMcpRows(deps: RouteDeps): Promise<McpRow[]> {
   })
 }
 
-/** 由 store 的读结果与清单拼出 `GlobalValue`（两个读路由共用）。 */
-function toGlobalValue(
-  loaded: { policy: LayerPolicy; revision: string | null },
-  inventory: { skills: GroupedSkillRow[]; mcps: McpRow[] },
-): GlobalValue {
-  return {
-    policy: loaded.policy,
-    revision: loaded.revision,
-    inventory,
-  }
-}
-
 /**
  * 读会话语境的工作区路由入参：解析 `sessionId` → 解析会话。
  *
@@ -222,14 +210,15 @@ function saveFailure(
  * 理由是全局层是**决定开关的地方**：若在此隐藏 `modelInvocable === false` 的能力，
  * 用户就再也找不到入口把它们重新打开。工作区层才做收窄（见 `handleWorkspace`）。
  */
-async function readGlobalValue(deps: RouteDeps, payload: Record<string, unknown> | null): Promise<GlobalValue> {
+async function readGlobalValue(deps: RouteDeps): Promise<GlobalValue> {
   const loaded = await deps.store.loadGlobal()
   const skills = await readGlobalSkills(deps.skills)
   const mcps = await readMcpRows(deps)
-  return toGlobalValue(loaded, {
-    skills: withGroups(skills.rows),
-    mcps,
-  })
+  return {
+    policy: loaded.policy,
+    revision: loaded.revision,
+    inventory: { skills: withGroups(skills.rows), mcps },
+  }
 }
 
 /**
@@ -237,7 +226,7 @@ async function readGlobalValue(deps: RouteDeps, payload: Record<string, unknown>
  */
 export async function handleGlobal(body: unknown, deps: RouteDeps): Promise<Envelope<GlobalValue>> {
   try {
-    return { ok: true, value: await readGlobalValue(deps, asRecord(body)) }
+    return { ok: true, value: await readGlobalValue(deps) }
   } catch (error) {
     return internal(error)
   }
@@ -265,7 +254,7 @@ export async function handleGlobalSave(body: unknown, deps: RouteDeps): Promise<
     // shadow/restriction 上，而下面的读取仍读磁盘（不读落地结果），顺序对读值无影响；
     // 但放在这里能让「写入 → 落地 → 回读」在同一条 try 里，异常语义一处可见。
     await deps.reapplyAfterSave()
-    return { ok: true, value: await readGlobalValue(deps, payload) }
+    return { ok: true, value: await readGlobalValue(deps) }
   } catch (error) {
     return internal(error)
   }

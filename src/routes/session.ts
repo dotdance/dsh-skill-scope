@@ -22,29 +22,23 @@ export interface SessionView {
 }
 
 /**
- * 读观察体的 `[Symbol.dispose]` 释放钩子。
+ * 释放会话观察体。
  *
  * 观察 lease **不提供** `.dispose()` 方法，只有 `[Symbol.dispose]`
  * （`@deepseek-ai/dsh-session-query/lib/index.js:467` / `:502`）。
- * 用 `Symbol.dispose` 取值时必须先确认该 symbol 存在：老运行时上 `Symbol.dispose` 可能是
- * `undefined`，那样 `source[undefined]` 会退化成读字符串键 `"undefined"`。
- */
-function readSymbolDispose(source: unknown): (() => void) | null {
-  const record = asRecord(source)
-  if (record === null) return null
-  const symbol = Symbol.dispose
-  if (typeof symbol !== 'symbol') return null
-  const value = (record as Record<symbol, unknown>)[symbol]
-  return typeof value === 'function' ? (value as () => void) : null
-}
-
-/**
- * 观察体只暴露 `[Symbol.dispose]`、**没有** `.dispose()` 方法（见 `readSymbolDispose` 的注释），
- * 所以释放一律走这里；失败只 warn —— 本函数的返回值比一次释放失败更重要。
+ * 取 `Symbol.dispose` 前必须确认该 symbol 存在：老运行时上它可能是 `undefined`，
+ * 那时 `record[undefined]` 会退化成读字符串键 `"undefined"`。
+ *
+ * 失败只 warn —— 本函数的返回值（会话视图）比一次释放失败更重要。
  */
 function releaseObservation(ctx: PluginContextLike, observation: unknown, sessionId: string): void {
   try {
-    readSymbolDispose(observation)?.()
+    const record = asRecord(observation)
+    const symbol = Symbol.dispose
+    if (record !== null && typeof symbol === 'symbol') {
+      const dispose = (record as Record<symbol, unknown>)[symbol]
+      if (typeof dispose === 'function') (dispose as () => void)()
+    }
   } catch (error) {
     ctx.logger.warn(`dsh-skill-scope: 释放会话观察失败（sessionId=${sessionId}）：${String(error)}`)
   }

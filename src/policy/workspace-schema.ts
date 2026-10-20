@@ -162,11 +162,6 @@ export function parseWorkspacePolicy(text: string | undefined): {
   return { policy: EMPTY_WORKSPACE_POLICY }
 }
 
-/** 某一项在工作区层的决定：`undefined` 表示跟随全局。 */
-export function localStateOf(policy: WorkspacePolicy, domain: Domain, name: string): boolean | undefined {
-  return policy[domain][name]
-}
-
 /**
  * 剔除与全局**同向**的条目（设计 3.3 写盘规则）。
  *

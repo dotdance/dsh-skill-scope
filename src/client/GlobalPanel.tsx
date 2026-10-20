@@ -1,17 +1,10 @@
 import { useCallback, useState, type ReactNode } from 'react'
 import { ApiError, post, ROUTES } from './api.ts'
-import {
-  ViewBar,
-  WiredCapabilityBody,
-  createDefaultTranslate,
-  isEnabled,
-  toMcpRows,
-  toSkillRows,
-  usePolicyPanel,
-  type Domain,
-  type PolicyValue,
-  type Translate,
-} from './CapabilityPanel.tsx'
+import { CapabilityPanelBody, ViewBar } from './CapabilityPanel.tsx'
+import { createDefaultTranslate } from './locales.ts'
+import { isEnabled, toMcpRows, toSkillRows, type Domain } from './panel-model.ts'
+import { usePolicyPanel } from './panel-state.ts'
+import type { GlobalValue, Translate } from './types.ts'
 import styles from './styles.module.css'
 
 /**
@@ -25,82 +18,8 @@ import styles from './styles.module.css'
  *
  * 本文件是**外壳**：行派生、开关接线、视图条、列表主体都在 `CapabilityPanel.tsx`，
  * 与工作区弹层共用。这里只剩全局面板独有的部分——`styles.panel` 外壳、标题、
- * `rev` 提示、以及保存响应「整体替换」的线上形状。
+ * 以及保存响应「整体替换」的线上形状（全局响应就是完整的 `GlobalValue`）。
  */
-
-/**
- * `CapabilityRow` 在 `parts.tsx`、`Translate` 在共享内核（`CapabilityPanel.tsx`）。
- * 这里只转发 `CapabilityRow`：`WorkspaceModal` 已从本模块取 `GlobalValue`，
- * 让它为这一个类型多开一条 import 路径没有收益。
- */
-export type { CapabilityRow } from './parts.tsx'
-
-/** 与宿主 `GlobalValue` / `WorkspaceValue` 同形的返回体（结构性声明，不 import 宿主代码）。 */
-interface SkillRowValue {
-  name: string
-  description: string
-  source: string
-  modelInvocable: boolean
-  /**
-   * 来源分组的稳定 key 与显示名，**由服务端算好**（见 `src/routes/handlers.ts` 的
-   * `GroupedSkillRow`）。前端不重算：路径归一化与插件名提取只该有一份实现。
-   * 旧版服务端不返回这两个字段时它们是 `undefined`，卡片就退回扁平渲染。
-   */
-  group?: string
-  groupLabel?: string
-  /**
-   * 真实来源（插件名或磁盘注册根绝对路径），**由服务端算好**。
-   * `null` = 没有磁盘出处（runtime 注入的 skill）。旧版服务端不给这个字段时是
-   * `undefined`，与 `null` 同样处理——两种情况都渲染成本地化文案，不必区分，
-   * 因为用户看到的行为应当一致。
-   */
-  sourceLabel?: string | null
-}
-
-interface McpRowValue {
-  serverName: string
-  toolCount: number
-  /** 该 server 的完整工具名 `mcp__<server>__<tool>`；服务端已去重排序（`McpRow.toolNames`）。 */
-  toolNames: string[]
-  source: 'global' | 'scope'
-  restrictable: boolean
-  loaded: boolean
-}
-
-interface InventoryValue {
-  skills: SkillRowValue[]
-  mcps: McpRowValue[]
-}
-
-/**
- * 面板消费的策略视图。字段名与 `src/routes/handlers.ts` 的 `GlobalValue` 逐一对应。
- */
-export interface GlobalValue extends PolicyValue {
-  policy: { mode: 'blacklist'; skills: string[]; mcps: string[] }
-  inventory: InventoryValue
-}
-
-/**
- * 工作区视图。**不再继承 `GlobalValue`**：三态语义下它带的是两份策略
- * （`global` + `workspace`），而不是一份「本层名单」。
- *
- * - `global`：全局层（黑名单）。只读用途，供客户端判断「这一项与全局是否不同」。
- * - `workspace`：本工程的决定（`名字 → 布尔`）。**键不存在 = 跟随全局**。
- *
- * 最终状态 = `workspace[名字] ?? !global.includes(名字)`，与服务端 `openResolver`
- * 同一公式（`src/policy/evaluate.ts`）。
- */
-export interface WorkspaceValue {
-  global: { mode: 'blacklist'; skills: string[]; mcps: string[] }
-  workspace: { skills: Record<string, boolean>; mcps: Record<string, boolean> }
-  revision: string | null
-  cwd: string
-  policyPath: string
-  exists: boolean
-  /** 该会话当前是否有 live Agent。`false` ⇒ 必须显示「非实时」。 */
-  live: boolean
-  inventory: InventoryValue
-}
 
 /** 组件对外属性。`sessionId` 可选：全局面板与具体会话无关（仅随保存请求透传）。 */
 export interface GlobalPanelProps {
@@ -202,7 +121,7 @@ export function GlobalPanel(props: GlobalPanelProps): ReactNode {
       {/* 视图过滤器（全部 / 已启用 / 已禁用）：只筛列表，不写策略。 */}
       <ViewBar view={panel.view} onChange={panel.setView} t={t} />
 
-      <WiredCapabilityBody
+      <CapabilityPanelBody
         t={t}
         panel={panel}
         skills={skillRows}
