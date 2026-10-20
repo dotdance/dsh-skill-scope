@@ -20,10 +20,21 @@ on:
         required: true
         type: string
 
-  # 主入口：Release 被"发布"（草稿转正）时触发。
-  # 注意用 released 而不是 published：published 在"存为草稿"时也会触发。
+  # 主入口：Release 被"发布"时触发。
+  #
+  # 用 published，**不能用 released**。官方文档（events-that-trigger-workflows，
+  # `release` 一节的 NOTE）原文：
+  #   "If you want a workflow to run when stable and pre-releases publish,
+  #    subscribe to `published` instead of `released` and `prereleased`."
+  # 实测（2026-10-20）：把 v0.3.0-alpha.1 以"预发布"发布后，只订阅 released 的
+  # 本 workflow **一次都没跑**（`gh api .../actions/runs?event=release` 仍只有
+  # v0.2.1 那一条）。alpha / rc 版本因此永远发不出去，只能靠 workflow_dispatch 补。
+  #
+  # 关于草稿：`created` / `edited` / `deleted` 对草稿 release 都不触发；
+  # 草稿转为发布时才发 `published`。所以 published 不会因为"存为草稿"误触发
+  #（v1 的注释写成相反结论，是错的，已按官方文档改正）。
   release:
-    types: [released]
+    types: [published]
 
 # OIDC 需要 id-token: write；checkout 需要 contents: read。
 permissions:
