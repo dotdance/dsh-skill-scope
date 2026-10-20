@@ -67,7 +67,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Verify the version matches package.json
+      - name: Verify the version, then pick the dist-tag
         env:
           # 两个触发源分别取值。判分支用 EVENT_NAME，不用"输入是否为空"，
           # 因为手动触发时用户留空输入也会得到空字符串，不是未定义。
@@ -114,6 +114,30 @@ jobs:
           fi
           echo "准备发布版本：$PKG_VERSION"
 
+          # 决定 dist-tag。npm 11 起，**预发布版本不带 --tag 会被直接拒绝**：
+          #   npm error You must specify a tag using --tag when publishing a prerelease version.
+          # 所以这里必须显式给出标签，否则 0.3.0-alpha.1 这类版本永远发不出去。
+          #
+          # 规则：取版本号里 '-' 之后的第一段作为标签（0.3.0-alpha.1 → alpha，
+          # 1.0.0-rc.2 → rc）；正式版本用 latest。
+          # 好处：latest 始终指向最近的正式版，普通用户 npm i 不会误装预发布版；
+          # 要用预发布版必须显式写 @alpha / @rc。
+          case "$PKG_VERSION" in
+            *-*)
+              DIST_TAG="${PKG_VERSION#*-}"
+              DIST_TAG="${DIST_TAG%%.*}"
+              ;;
+            *)
+              DIST_TAG="latest"
+              ;;
+          esac
+          if [ -z "$DIST_TAG" ]; then
+            echo "::error::无法从版本号 $PKG_VERSION 推出 dist-tag。"
+            exit 1
+          fi
+          echo "dist-tag: $DIST_TAG"
+          echo "DIST_TAG=$DIST_TAG" >> "$GITHUB_ENV"
+
       - name: Typecheck
         run: pnpm run typecheck
 
@@ -139,14 +163,20 @@ jobs:
           done
 
       # OIDC 模式下 provenance 由 npm 自动生成，**不需要** --provenance 参数。
+      # --tag 来自上一步算出的 $DIST_TAG（写入 $GITHUB_ENV 跨步骤传递）；
+      # 预发布版本缺了它 npm 会直接报错。
       - name: Publish to npm
-        run: npm publish --access public
+        run: npm publish --access public --tag "$DIST_TAG"
 
       - name: Summary
         run: |
+          VERSION="$(node -p "require('./package.json').version")"
           {
-            echo "### 已发布 @dotdance/dsh-skill-scope@$(node -p "require('./package.json').version")"
+            echo "### 已发布 @dotdance/dsh-skill-scope@$VERSION"
             echo ""
             echo "- 触发器：${{ github.event_name }}"
+            echo "- dist-tag：\`$DIST_TAG\`"
             echo "- 签名：npm provenance（OIDC 自动生成）"
+            echo ""
+            echo "安装：\`npm i @dotdance/dsh-skill-scope@$DIST_TAG\`"
           } >> "$GITHUB_STEP_SUMMARY"
