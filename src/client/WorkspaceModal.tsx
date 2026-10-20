@@ -2,14 +2,16 @@ import { useCallback, useState, type ReactNode } from 'react'
 import { ApiError, post, ROUTES } from './api.ts'
 import {
   ViewBar,
+  WORKSPACE_VIEW_ORDER,
   WiredCapabilityBody,
   createDefaultTranslate,
   toMcpRows,
   toSkillRows,
   usePolicyPanel,
+  type Domain,
   type Translate,
 } from './CapabilityPanel.tsx'
-import type { GlobalValue, WorkspaceValue } from './GlobalPanel.tsx'
+import type { WorkspaceValue } from './GlobalPanel.tsx'
 import { CloseIcon, CloverIcon } from './parts.tsx'
 import styles from './styles.module.css'
 
@@ -29,15 +31,39 @@ import styles from './styles.module.css'
  */
 
 /**
- * 工作区返回体的完整形状：`WorkspaceValue` + 一个可选的 UI 辅助字段。
+ * 工作区返回体。**与宿主同名同形**，不再追加任何「UI 辅助字段」。
  *
- * 曾经这里还有 `inherited: { total, disabledGlobally }` 与一个 `deriveInherited` 本地推导，
- * 供 MCP 段顶部那句「继承自全局：N 项（全局已关闭 M 项）」使用。2026-10-14 那行按用户
- * 要求删除（两处面板都删），`inherited` 因此**不再被面板读取**——服务端仍在返回它
- * （`buildWorkspaceView`），保留是为了不改线上形状；前端不声明它就不会误用。
+ * 曾经的 `disabledGlobally` 与 `inherited` 都已从线上形状中删除：三态语义下没有
+ * 「被全局摘掉」这回事——全局关闭的项照样列出来，用户可以在本工程把它打开。
  */
-export interface WorkspaceRouteValue extends WorkspaceValue {
-  disabledGlobally?: string[]
+export type WorkspaceRouteValue = WorkspaceValue
+
+/**
+ * 全局层的开关取值：名单里列的就是被关掉的。
+ *
+ * 与 `src/policy/evaluate.ts` 的 `openResolver` 同一规则。这里必须**自己再写一遍**
+ * 而不是 import 宿主代码：客户端产物与宿主是两份构建，跨端 import 会把服务端模块
+ * 拖进浏览器包。
+ */
+function globalOpen(names: readonly string[], name: string): boolean {
+  return !names.includes(name)
+}
+
+/** 三态取值：本层表里有这个键就听表，没有就跟随全局。 */
+function isOpen(value: WorkspaceRouteValue, which: Domain, name: string): boolean {
+  return value.workspace[which][name] ?? globalOpen(value.global[which], name)
+}
+
+/**
+ * 是否「与全局不同」——**只由这一个条件决定**（用户明确要求）。
+ *
+ * 表里没有这个键 ⇒ 跟随全局 ⇒ 不是差异；
+ * 表里有键且与全局同向 ⇒ 也不是差异（保存时这种条目会被服务端剔除，属于历史残留）；
+ * 表里有键且与全局反向 ⇒ 是差异 ⇒ 标红。
+ */
+function isOverridden(value: WorkspaceRouteValue, which: Domain, name: string): boolean {
+  const local = value.workspace[which][name]
+  return local !== undefined && local !== globalOpen(value.global[which], name)
 }
 
 export interface WorkspaceModalProps {
@@ -84,29 +110,45 @@ export function WorkspaceModal(props: WorkspaceModalProps): ReactNode {
    * 比如排序、去重、上限截断）。其余视图字段保留读取时的那一份。
    */
   const save = useCallback(
-    async (current: WorkspaceRouteValue, nextPolicy: GlobalValue['policy']): Promise<WorkspaceRouteValue> =>
+    async (current: WorkspaceRouteValue, next: WorkspaceRouteValue): Promise<WorkspaceRouteValue> =>
       post<WorkspaceRouteValue>(ROUTES.workspaceSave, {
         sessionId,
-        mode: nextPolicy.mode,
-        skills: nextPolicy.skills,
-        mcps: nextPolicy.mcps,
+        workspace: next.workspace,
         revision: current.revision,
       }),
     [sessionId],
+  )
+
+  /**
+   * 翻转一项：**改表**，而且只在「与全局不同」时才往表里写键。
+   *
+   * 回到全局状态时**删键**（而不是写一个与全局同向的值）：这样「表里的键 = 用户的显式
+   * 决定」这条不变量在客户端也成立，红标与磁盘内容不会出现「本地已经恢复默认、文件里
+   * 还留着一条将被服务端静默剔除的条目」这种短暂分叉。
+   */
+  const toggle = useCallback(
+    (current: WorkspaceRouteValue, which: Domain, name: string, open: boolean): WorkspaceRouteValue | null => {
+      const base = globalOpen(current.global[which], name)
+      const next: Record<string, boolean> = { ...current.workspace[which] }
+      if (open === base) delete next[name]
+      else next[name] = open
+      return { ...current, workspace: { ...current.workspace, [which]: next } }
+    },
+    [],
   )
 
   const mergeSaved = useCallback(
     (previous: WorkspaceRouteValue, saved: WorkspaceRouteValue): WorkspaceRouteValue => ({
       ...previous,
       revision: saved.revision,
-      ...(saved.policy === undefined ? {} : { policy: saved.policy }),
+      ...(saved.workspace === undefined ? {} : { workspace: saved.workspace }),
     }),
     [],
   )
 
   const load = useCallback(async (): Promise<WorkspaceRouteValue> => loadWorkspace(sessionId), [sessionId])
 
-  const panel = usePolicyPanel<WorkspaceRouteValue>({ load, save, mergeSaved })
+  const panel = usePolicyPanel<WorkspaceRouteValue>({ load, save, toggle, mergeSaved })
 
   const refresh = (): void => {
     void panel.refresh()
@@ -133,17 +175,24 @@ export function WorkspaceModal(props: WorkspaceModalProps): ReactNode {
   }
 
   /*
-   * 被全局关闭的名单由服务端给（`disabledGlobally`，skill 名 + MCP server 名并集）。
-   * 2026-10-14 之后它**只剩一个用处**：`toMcpRows` 的 `excludeNames` —— 全局关掉的 MCP
-   * 整条不出现在列表里（全局层是硬上限）。原先它还喂段尾那句「被全局关闭 N 项」的计数，
-   * 那句按用户要求删掉了。
+   * 行派生：**一项都不摘除**，最终状态按三态取值，跨层差异单独标记。
    *
-   * 缺省时退回 `[]`：旧版服务端不给这个字段时，宁可让一条本该被摘除的 MCP 照常显示
-   * （可见的过度授予），也不要凭空摘掉一条用户配的项（静默失效更糟）。
+   * 全局关闭的项必须留在列表里，否则用户在本工程找不到入口把它打开——那正是本次改动
+   * 要解决的场景。摘除只有一种合法理由：这一行根本没有行数据（名字已被卸载，服务端
+   * 的清单并集里也没有它），那种行不会出现在 `inventory` 里，不需要前端口径再判一次。
    */
-  const disabledGlobally = value.disabledGlobally ?? []
-  const skillRows = toSkillRows(value.inventory.skills, value.policy.skills, t)
-  const mcpRows = toMcpRows(value.inventory.mcps, value.policy.mcps, t, disabledGlobally)
+  const skillRows = toSkillRows(
+    value.inventory.skills,
+    (name) => isOpen(value, 'skills', name),
+    t,
+    (name) => isOverridden(value, 'skills', name),
+  )
+  const mcpRows = toMcpRows(
+    value.inventory.mcps,
+    (name) => isOpen(value, 'mcps', name),
+    t,
+    (name) => isOverridden(value, 'mcps', name),
+  )
   const project = projectNameOf(value.cwd)
 
   return (
@@ -194,7 +243,7 @@ export function WorkspaceModal(props: WorkspaceModalProps): ReactNode {
           {value.live ? <span hidden data-testid="workspace-live" /> : null}
 
           {/* 视图过滤器（全部 / 已启用 / 已禁用）：只筛列表，不写策略。 */}
-          <ViewBar view={panel.view} onChange={panel.setView} t={t} />
+          <ViewBar view={panel.view} onChange={panel.setView} t={t} views={WORKSPACE_VIEW_ORDER} />
         </div>
 
         <div className={styles.panelBody}>

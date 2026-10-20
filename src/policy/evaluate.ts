@@ -1,9 +1,20 @@
 import type { LayerPolicy } from './schema.ts'
+import type { Domain, WorkspacePolicy } from './workspace-schema.ts'
 
-/** 一个会话实际生效的两层策略。工作区层缺失用 `null` 表示「不进一步收窄」。 */
+/**
+ * 一个会话实际生效的两层策略（设计 4.2）。
+ *
+ * 两层形状**不同**：
+ * - `global` 是黑名单（`LayerPolicy`，名单里的是要关掉的）；
+ * - `workspace` 是逐项绝对状态（`WorkspacePolicy`，`名字 → 布尔`）。
+ *
+ * 因此工作区层可以**打开**全局关着的项：全局从「硬上限」退化为「默认值」。
+ * 这是设计变更而非实现细节——旧版不变量 1/2/3/19（「全局是硬上限、工作区只能收窄」）
+ * 已被本条取代，见 `docs/design.md`。
+ */
 export interface EffectivePolicy {
   global: LayerPolicy
-  workspace: LayerPolicy | null
+  workspace: WorkspacePolicy | null
 }
 
 /** 两层生效集求值用到的清单（名字本身，不含元数据）。 */
@@ -13,23 +24,7 @@ export interface Inventories {
 }
 
 /**
- * 单层的生效集合（设计 4.1）。
- *
- * **只有黑名单一种语义**：名单是「要关掉的」，
- * 所以生效集是差集。`default` 与 `blacklist` 都走这一条——`default` 只作为
- * 历史取值存在，`normalizePolicy` 已把它归一到 `blacklist`，这里再兜一次
- * 是为了让 `allowedNames` 在不经过解析的调用点上也不会漏掉名单。
- *
- * 保留 `names` 的原始顺序，便于 UI 按清单的稳定次序渲染。
- */
-export function allowedNames(names: readonly string[], policy: LayerPolicy): string[] {
-  const denied = new Set([...policy.skills, ...policy.mcps])
-  if (denied.size === 0) return [...names]
-  return names.filter((name) => !denied.has(name))
-}
-
-/**
- * 两层生效集求值的结果（设计 4.2）。
+ * 两层生效集求值的结果（设计 4.3）。
  * `key` 是一个规范化字符串，用于「目标集没变就不重注册」的廉价比较；
  * **刻意不含清单内容**——清单变化由各自的 `skills/change` / `tools/change` 处理，
  * 这里只需要识别「隐藏集合本身」是否变化。
@@ -40,40 +35,36 @@ export interface HiddenResult {
   key: string
 }
 
+const deniedOf = (global: LayerPolicy, domain: Domain): readonly string[] =>
+  domain === 'skills' ? global.skills : global.mcps
+
 /**
- * 计算一个会话**被关掉**的名字（全局层是硬上限，见不变量 1、2、3、19）。
+ * 建一个「某域名字 → 是否启用」的判定函数（设计 4.1）。
  *
- * 关键顺序：先对清单应用全局层，**再**对该结果应用工作区层。
- * 因此工作区层永远无法把全局层关掉的名字重新打开——这正是「全局是硬上限」的算法表达。
- * 工作区层为 `null` 时跳过第二层，即「不进一步收窄」。
+ * 规则只有一条：**工作区有决定就用决定，没有就跟随全局**。
+ * `false` 是有效值，所以只能写 `??`，不能用 `||`（`false || 默认` 会吞掉「明令关」）。
+ *
+ * 返回函数而不是单次判定：调用方（`hiddenNames`、工作区视图）都是按域遍历，
+ * 每次调用都重建 Set 会让 512 项的清单退化成 O(n²)。全局名单里同一个名字
+ * 可能同时出现在 skills 与 mcps，所以两个域必须各建一个 Set，不能合并。
  */
-export function hiddenNames(inventories: Inventories, effective: EffectivePolicy): HiddenResult {
-  const skillsAllowed = allowedNames(inventories.skills, effective.global)
-  const skillsEffective =
-    effective.workspace === null ? skillsAllowed : allowedNames(skillsAllowed, pick(effective.workspace, 'skills'))
-
-  const mcpsAllowed = allowedNames(inventories.mcps, effective.global)
-  const mcpsEffective =
-    effective.workspace === null ? mcpsAllowed : allowedNames(mcpsAllowed, pick(effective.workspace, 'mcps'))
-
-  // 用 Set 判定「是否还在生效集里」：清单可达 512 项（`MAX_NAMES`），
-  // 逐个 `includes` 是 O(n²)；这里只要结果顺序与 `inventories` 一致即可。
-  const skillsAlive = new Set(skillsEffective)
-  const mcpsAlive = new Set(mcpsEffective)
-  const skills = inventories.skills.filter((name) => !skillsAlive.has(name)).sort()
-  const mcps = inventories.mcps.filter((name) => !mcpsAlive.has(name)).sort()
-  return { skills, mcps, key: `skills=${skills.join(',')}|mcps=${mcps.join(',')}` }
+export function openResolver(effective: EffectivePolicy, domain: Domain): (name: string) => boolean {
+  const denied = new Set(deniedOf(effective.global, domain))
+  const local = effective.workspace?.[domain]
+  return (name) => local?.[name] ?? !denied.has(name)
 }
 
 /**
- * 把「一份名单两个域」的 `LayerPolicy` 收窄成只看某一域的等价策略。
- * `LayerPolicy` 只有单个 `mode`，所以求值时必须把另一域的名单清空，
- * 否则 MCP 名单会被误当成 skill 的关闭名单。
+ * 计算一个会话**被关掉**的名字（设计 4.1）。
  *
- * 白名单删除后这条仍然必要：`allowedNames` 把两份名单并成一个拒绝集，
- * 分域求值时若不先清空另一域，skill 段会把 MCP 的名字也当成要关的。
+ * 逐名字解析，不再做「集合求交」：旧实现先用全局名单求差集、再用工作区名单求差集，
+ * 那个顺序本身就是「工作区只能收窄」的算法表达。现在工作区可以反向覆盖，
+ * 集合运算表达不了这件事，必须逐名字取状态。
  */
-function pick(policy: LayerPolicy, domain: 'skills' | 'mcps'): LayerPolicy {
-  if (domain === 'skills') return { mode: policy.mode, skills: policy.skills, mcps: [] }
-  return { mode: policy.mode, skills: [], mcps: policy.mcps }
+export function hiddenNames(inventories: Inventories, effective: EffectivePolicy): HiddenResult {
+  const openSkill = openResolver(effective, 'skills')
+  const openMcp = openResolver(effective, 'mcps')
+  const skills = inventories.skills.filter((name) => !openSkill(name)).sort()
+  const mcps = inventories.mcps.filter((name) => !openMcp(name)).sort()
+  return { skills, mcps, key: `skills=${skills.join(',')}|mcps=${mcps.join(',')}` }
 }

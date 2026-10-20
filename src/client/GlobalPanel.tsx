@@ -4,9 +4,11 @@ import {
   ViewBar,
   WiredCapabilityBody,
   createDefaultTranslate,
+  isEnabled,
   toMcpRows,
   toSkillRows,
   usePolicyPanel,
+  type Domain,
   type PolicyValue,
   type Translate,
 } from './CapabilityPanel.tsx'
@@ -78,13 +80,26 @@ export interface GlobalValue extends PolicyValue {
   inventory: InventoryValue
 }
 
-/** 工作区视图 = 全局视图 + 工程信息。由 `WorkspaceModal` 消费。 */
-export interface WorkspaceValue extends GlobalValue {
+/**
+ * 工作区视图。**不再继承 `GlobalValue`**：三态语义下它带的是两份策略
+ * （`global` + `workspace`），而不是一份「本层名单」。
+ *
+ * - `global`：全局层（黑名单）。只读用途，供客户端判断「这一项与全局是否不同」。
+ * - `workspace`：本工程的决定（`名字 → 布尔`）。**键不存在 = 跟随全局**。
+ *
+ * 最终状态 = `workspace[名字] ?? !global.includes(名字)`，与服务端 `openResolver`
+ * 同一公式（`src/policy/evaluate.ts`）。
+ */
+export interface WorkspaceValue {
+  global: { mode: 'blacklist'; skills: string[]; mcps: string[] }
+  workspace: { skills: Record<string, boolean>; mcps: Record<string, boolean> }
+  revision: string | null
   cwd: string
   policyPath: string
   exists: boolean
   /** 该会话当前是否有 live Agent。`false` ⇒ 必须显示「非实时」。 */
   live: boolean
+  inventory: InventoryValue
 }
 
 /** 组件对外属性。`sessionId` 可选：全局面板与具体会话无关（仅随保存请求透传）。 */
@@ -123,20 +138,36 @@ export function GlobalPanel(props: GlobalPanelProps): ReactNode {
    * 把 `null` 折成 `undefined` 会改变服务端的守卫语义。
    */
   const save = useCallback(
-    async (current: GlobalValue, nextPolicy: GlobalValue['policy']): Promise<GlobalValue> =>
+    async (current: GlobalValue, next: GlobalValue): Promise<GlobalValue> =>
       post<GlobalValue>(ROUTES.globalSave, {
-        mode: nextPolicy.mode,
-        skills: nextPolicy.skills,
-        mcps: nextPolicy.mcps,
+        mode: next.policy.mode,
+        skills: next.policy.skills,
+        mcps: next.policy.mcps,
         revision: current.revision,
         ...(sessionId === undefined ? {} : { sessionId }),
       }),
     [sessionId],
   )
 
+  /**
+   * 翻转一项：**改数组**（名字在名单里 = 关）。
+   *
+   * 全局层没有「上层」，因此没有三态可言：开关只有开/关，写回的就是黑名单本身。
+   */
+  const toggle = useCallback(
+    (current: GlobalValue, which: Domain, name: string, open: boolean): GlobalValue | null => {
+      if (isEnabled(current.policy[which], name) === open) return null
+      const updated = open
+        ? current.policy[which].filter((item) => item !== name)
+        : [...current.policy[which], name]
+      return { ...current, policy: { ...current.policy, [which]: updated } }
+    },
+    [],
+  )
+
   const load = useCallback(async (): Promise<GlobalValue> => loadGlobal(sessionId), [sessionId])
 
-  const panel = usePolicyPanel<GlobalValue>({ load, save })
+  const panel = usePolicyPanel<GlobalValue>({ load, save, toggle })
 
   const refresh = (): void => {
     void panel.refresh()
@@ -159,8 +190,8 @@ export function GlobalPanel(props: GlobalPanelProps): ReactNode {
     )
   }
 
-  const skillRows = toSkillRows(value.inventory.skills, value.policy.skills, t)
-  const mcpRows = toMcpRows(value.inventory.mcps, value.policy.mcps, t)
+  const skillRows = toSkillRows(value.inventory.skills, (name) => isEnabled(value.policy.skills, name), t)
+  const mcpRows = toMcpRows(value.inventory.mcps, (name) => isEnabled(value.policy.mcps, name), t)
 
   return (
     <div className={styles.panel} data-testid="global-panel">

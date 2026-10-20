@@ -206,6 +206,8 @@ describe('GlobalPanel', () => {
       expect(within(row).getByTestId('view-all').getAttribute('aria-pressed')).toBe('true')
       expect(within(row).getByTestId('view-enabled').getAttribute('aria-pressed')).toBe('false')
       expect(within(row).getByTestId('view-disabled').getAttribute('aria-pressed')).toBe('false')
+      // 全局层没有「上一层」，「与全局不同」在这里无定义 ⇒ 不渲染这个按钮。
+      expect(within(row).queryByTestId('view-overridden')).toBeNull()
     })
 
     it('filters the list without sending a save request', async () => {

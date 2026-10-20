@@ -45,11 +45,22 @@ export type { Translate } from './translate.ts'
  * 名单视图：只决定**列表里显示哪些行**，不改任何一行开关，也不落盘。
  *
  * 与已废弃的「模式选择器」的关键区别：旧按钮按下会重写名单（一次真实写入）。
+ *
+ * `overridden` 只有工作区层有意义：它筛「本工程改过全局的项」。
+ * 全局层没有上层可对照，所以那一层按 `VIEW_ORDER` 渲染，少一个按钮。
  */
-export type PolicyView = 'all' | 'enabled' | 'disabled'
+export type PolicyView = 'all' | 'enabled' | 'disabled' | 'overridden'
 
 /** 视图按钮的呈现顺序：全部 → 已启用 → 已禁用。`ViewBar` 按它渲染。 */
 export const VIEW_ORDER: readonly PolicyView[] = ['all', 'enabled', 'disabled']
+
+/**
+ * 工作区层的视图按钮：在 `VIEW_ORDER` 之后多一个「与全局不同」。
+ *
+ * **不放进 `VIEW_ORDER`**：全局层渲染它只会得到一个永远空着的列表 ——
+ * 全局层没有「上一层」，「与全局不同」在那里无定义。
+ */
+export const WORKSPACE_VIEW_ORDER: readonly PolicyView[] = [...VIEW_ORDER, 'overridden']
 
 /** 视图按钮的 `data-testid`；两面板共用，测试引用它而不手抄字符串。 */
 export const viewTestId = (view: PolicyView): string => `view-${view}`
@@ -82,7 +93,21 @@ export function describeError(error: unknown): string {
 
 // --- 行派生 ---
 
-/** 名单里列的就是被关掉的（唯一语义）。 */
+/** 两个域的稳定名字。求值、翻转、渲染都按它分派。 */
+export type Domain = 'skills' | 'mcps'
+
+/**
+ * 取一层的「某项是否打开」。
+ *
+ * 两层形状不同（全局是黑名单数组，工作区是逐项表），所以行派生不再接收「名单」，
+ * 只接收一个取值函数。这样两个面板共用同一段渲染，而语义差异只存在于各自的取值函数里。
+ */
+export type OpenLookup = (name: string) => boolean
+
+/** 取「这一项是否与上层不同」（只为工作区提供；全局层没有上层）。 */
+export type OverrideLookup = (name: string) => boolean
+
+/** 全局层的取值规则：名单里列的就是被关掉的（唯一语义）。 */
 export function isEnabled(names: readonly string[], name: string): boolean {
   return !names.includes(name)
 }
@@ -118,14 +143,16 @@ export type McpLike = {
  */
 export function toSkillRows(
   skills: readonly SkillLike[],
-  policySkills: readonly string[],
+  isOpen: OpenLookup,
   t: Translate,
+  isOverridden: OverrideLookup = () => false,
 ): CapabilityRow[] {
   return skills.map((skill) => ({
     name: skill.name,
     description: skill.description,
     source: skill.source,
-    enabled: isEnabled(policySkills, skill.name),
+    enabled: isOpen(skill.name),
+    ...(isOverridden(skill.name) ? { overridden: true } : {}),
     // 不变量 22：Skill 行按 `modelInvocable` 区分，但**仍然可切换** ——
     // 不可调用只是标出来，不是只读（可调用性是宿主的事实，不是本面板的权限）。
     // `modelInvocable` 因此只影响展示，不参与「是否只读」的判定。
@@ -138,7 +165,9 @@ export function toSkillRows(
 }
 
 /**
- * MCP 行派生。`excludeNames` 是工作区独有的「被全局关掉则不列出」（全局传空）。
+ * MCP 行派生。与 `toSkillRows` 同形：**不排除任何行**——全局关掉的 server 也要留在
+ * 列表里，否则用户在工程里没有入口把它打开。
+ *
  * 只读判定：未加载或宿主不允许限制都不可切换。
  *
  * `tools` 原样透传服务端的 `toolNames`（**不在这里排序、不去重、不改写前缀**）：
@@ -147,32 +176,33 @@ export function toSkillRows(
  */
 export function toMcpRows(
   mcps: readonly McpLike[],
-  policyMcps: readonly string[],
+  isOpen: OpenLookup,
   t: Translate,
-  excludeNames: readonly string[] = [],
+  isOverridden: OverrideLookup = () => false,
 ): CapabilityRow[] {
-  return mcps
-    .filter((server) => !excludeNames.includes(server.serverName))
-    .map((server) => {
-      const readonly = !server.restrictable || !server.loaded
-      return {
-        name: server.serverName,
-        description: `${server.toolCount} tools`,
-        tools: server.toolNames,
-        source: server.source === 'global' ? t('state.global') : t('state.scope'),
-        enabled: isEnabled(policyMcps, server.serverName),
-        ...(readonly ? { readonly: true } : {}),
-      }
-    })
+  return mcps.map((server) => {
+    const readonly = !server.restrictable || !server.loaded
+    return {
+      name: server.serverName,
+      description: `${server.toolCount} tools`,
+      tools: server.toolNames,
+      source: server.source === 'global' ? t('state.global') : t('state.scope'),
+      enabled: isOpen(server.serverName),
+      ...(isOverridden(server.serverName) ? { overridden: true } : {}),
+      ...(readonly ? { readonly: true } : {}),
+    }
+  })
 }
 
 // --- 数据 hook ---
 
 /**
- * 面板数据的最小形状。两条路由都返回这三个字段（外加各自的视图字段）。
+ * **全局**面板数据的最小形状。`revision` 三态：`null` 表示「我期望文件还不存在」。
+ * **不可折叠成 `undefined`** —— 那会改变服务端的乐观锁守卫语义。
  *
- * `revision` 三态：`null` 表示「我期望文件还不存在」。**不可折叠成 `undefined`** ——
- * 那会改变服务端的乐观锁守卫语义。
+ * 工作区返回体的形状与它不同（`{global, workspace}`，没有单独一份 `policy`），
+ * 所以 `usePolicyPanel` 不再要求 `TValue extends PolicyValue`：两层的**读写规则**
+ * 由外壳注入，内核只负责加载、乐观改、串行提交与回滚。
  */
 export type PolicyValue = {
   revision: string | null
@@ -186,16 +216,28 @@ export type PolicyValue = {
  *  - 全局：保存响应就是完整的 `GlobalValue`，整体替换。
  *  - 工作区：只合并 `revision` 与 `policy`（`exists` 是写文件前的旧值）。
  */
-export type PolicyPanelOptions<TValue extends PolicyValue> = {
+export type PolicyPanelOptions<TValue> = {
   /** 读取。外壳用 `useCallback` 保证引用稳定。 */
   load: () => Promise<TValue>
-  /** 提交一次策略改动。`mutate` 收到当前值、返回**新策略**。 */
-  save: (current: TValue, nextPolicy: TValue['policy']) => Promise<TValue>
+  /**
+   * 提交一次改动。收到的是**整个新值**，不是「新策略」。
+   *
+   * 两层形状不同，把它们硬塞进一个共同字段只会逼出一层适配代码：
+   * 全局写 `{mode, skills[], mcps[]}`，工作区写 `{workspace: {skills: {}, mcps: {}}}`。
+   */
+  save: (current: TValue, next: TValue) => Promise<TValue>
+  /**
+   * 把一项翻到**指定**目标状态，返回新值；`null` 表示「目标状态已达成，不发请求」。
+   *
+   * 这是两层唯一真正不同的地方：全局改数组（在/不在），工作区改表（键在则用表值，
+   * 不在则跟随全局）。
+   */
+  toggle: (current: TValue, which: Domain, name: string, open: boolean) => TValue | null
   /** 保存成功后的值合并。省略则整体替换（全局即如此）。 */
   mergeSaved?: ((current: TValue, saved: TValue) => TValue) | undefined
 }
 
-export type PolicyPanelState<TValue extends PolicyValue> = {
+export type PolicyPanelState<TValue> = {
   value: TValue | null
   error: string | null
   busy: boolean
@@ -215,9 +257,9 @@ export type PolicyPanelState<TValue extends PolicyValue> = {
    * `mutate` 收到当前值、返回**新策略**；`null` 表示「不改」（例如目标状态已达成时）。
    * 与重构前两个面板的 `commit` 契约一致。
    */
-  commit: (mutate: (current: TValue) => TValue['policy'] | null) => Promise<void>
+  commit: (mutate: (current: TValue) => TValue | null) => Promise<void>
   /** 翻转一个名字到**指定**目标状态（不是盲翻转，避免连点导致状态发散）。 */
-  toggle: (name: string, next: boolean, which: 'skills' | 'mcps') => void
+  toggle: (name: string, next: boolean, which: Domain) => void
 }
 
 /**
@@ -226,9 +268,10 @@ export type PolicyPanelState<TValue extends PolicyValue> = {
  * 回滚依赖**提交时刻捕获的快照**，不是 `value` 的闭包 —— 后者在连续快速点击时会拿到
  * 过期的值，回滚到更早的状态。提交串行化（`chain`），避免并发写入互相覆盖。
  */
-export function usePolicyPanel<TValue extends PolicyValue>({
+export function usePolicyPanel<TValue>({
   load,
   save,
+  toggle: applyToggle,
   mergeSaved,
 }: PolicyPanelOptions<TValue>): PolicyPanelState<TValue> {
   const [value, setValue] = useState<TValue | null>(null)
@@ -292,19 +335,18 @@ export function usePolicyPanel<TValue extends PolicyValue>({
   valueRef.current = value
 
   const commit = useCallback(
-    async (mutate: (current: TValue) => TValue['policy'] | null): Promise<void> => {
+    async (mutate: (current: TValue) => TValue | null): Promise<void> => {
       // 同步读镜像 ref（见上方 `valueRef` 注释：updater 里取值是错的）。
       const current = valueRef.current
       if (current === null) return
-      const nextPolicy = mutate(current)
+      const next = mutate(current)
       // 目标状态已达成：不改（返回 `null`），避免无谓写入。
-      if (nextPolicy === null) return
-      setValue({ ...current, policy: nextPolicy })
+      if (next === null) return
+      setValue(next)
       setBusy(true)
       const snapshot: TValue = current
-      const optimistic: TValue = { ...snapshot, policy: nextPolicy }
       chain.current = chain.current
-        .then(() => save(optimistic, nextPolicy as TValue['policy']))
+        .then(() => save(snapshot, next))
         .then(
           (saved) => {
             if (!alive.current) return
@@ -333,18 +375,10 @@ export function usePolicyPanel<TValue extends PolicyValue>({
   )
 
   const toggle = useCallback(
-    (name: string, next: boolean, which: 'skills' | 'mcps') => {
-      void commit((current) => {
-        // 目标状态已达成：不改（返回 `null`），避免无谓写入。
-        if (isEnabled(current.policy[which], name) === next) return null
-        const listed = current.policy[which].includes(name)
-        const updated = next
-          ? current.policy[which].filter((item) => item !== name)
-          : [...current.policy[which], name]
-        return { ...current.policy, [which]: updated }
-      })
+    (name: string, next: boolean, which: Domain) => {
+      void commit((current) => applyToggle(current, which, name, next))
     },
-    [commit],
+    [commit, applyToggle],
   )
 
   return {
@@ -364,19 +398,26 @@ export function usePolicyPanel<TValue extends PolicyValue>({
 
 // --- 视图条 ---
 
-/** 三个视图按钮。切换**只改组件状态**，不触发保存。 */
+/**
+ * 视图按钮。切换**只改组件状态**，不触发保存。
+ *
+ * 按钮集合由 `views` 注入：全局层用 `VIEW_ORDER`（三种），工作区层用
+ * `WORKSPACE_VIEW_ORDER`（多一个「与全局不同」）。
+ */
 export function ViewBar({
   view,
   onChange,
   t,
+  views = VIEW_ORDER,
 }: {
   view: PolicyView
   onChange: (next: PolicyView) => void
   t: Translate
+  views?: readonly PolicyView[]
 }): ReactNode {
   return (
     <div className={styles.modeRow} data-testid="view-row">
-      {VIEW_ORDER.map((candidate) => (
+      {views.map((candidate) => (
         <button
           key={candidate}
           type="button"
@@ -402,6 +443,7 @@ export function listLabels(t: Translate): {
   emptyText: string
   enabledLabel: string
   disabledLabel: string
+  overriddenLabel: string
   detailStateKey: string
   detailSourceKey: string
   detailToolsKey: string
@@ -415,6 +457,7 @@ export function listLabels(t: Translate): {
     emptyText: t('state.empty'),
     enabledLabel: t('state.enabled'),
     disabledLabel: t('state.disabled'),
+    overriddenLabel: t('state.overridden'),
     detailStateKey: t('detail.state'),
     detailSourceKey: t('detail.source'),
     detailToolsKey: t('detail.tools'),
@@ -463,8 +506,16 @@ export function CapabilityPanelBody(props: CapabilityPanelBodyProps): ReactNode 
    * 复制到两处就等于给了「一处漏改」的机会（本次重构的动机之一）。
    * 视图只筛行，不碰开关，也不发保存请求。
    */
-  const visible = (rows: readonly CapabilityRow[]): readonly CapabilityRow[] =>
-    props.view === 'all' ? rows : rows.filter((row) => row.enabled === (props.view === 'enabled'))
+  const visible = (rows: readonly CapabilityRow[]): readonly CapabilityRow[] => {
+    if (props.view === 'all') return rows
+    /*
+     * 「与全局不同」问的是**跨层差异**（`row.overridden` 由服务端算、外壳传下来），
+     * 不是开关位置。所以它不能和下面两个视图共用 `row.enabled === …` 的写法：
+     * 一个被本工程打开的全局关闭项，`enabled` 为 true，却正是这个视图要展示的行。
+     */
+    if (props.view === 'overridden') return rows.filter((row) => row.overridden === true)
+    return rows.filter((row) => row.enabled === (props.view === 'enabled'))
+  }
   return (
     <>
       {props.error === null ? null : (
@@ -557,7 +608,7 @@ export function readInputValue(target: EventTarget | null): string {
  * **没有 `value` 字段。** 外壳自己已经持有 `value`，要看什么直接读，
  * 不需要经本组件转一手。
  */
-export type WiredBodyProps<TValue extends PolicyValue> = {
+export type WiredBodyProps<TValue> = {
   t: Translate
   panel: PolicyPanelState<TValue>
   skills: readonly CapabilityRow[]
@@ -569,7 +620,7 @@ export type WiredBodyProps<TValue extends PolicyValue> = {
   searchInputId?: string
 }
 
-export function WiredCapabilityBody<TValue extends PolicyValue>(
+export function WiredCapabilityBody<TValue>(
   props: WiredBodyProps<TValue>,
 ): ReactNode {
   const { t, panel } = props

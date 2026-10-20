@@ -23,14 +23,17 @@ function jsonOk(body: unknown, status = 200): Response {
 
 const workspaceValue = {
   /*
-   * 黑名单模式下列的就是**被关掉的**。故意关掉 `md-word-count`（它**确实在下面的
-   * `inventory.skills` 里**），好让段头与组头计数（`启用/总量`）的两个数不相等 ——
-   * 全开时任何只显示总数的实现都能让断言通过。
+   * 三态夹具：`workspace` 是**逐项表**，键不存在 = 跟随全局。
    *
-   * 注意不能填一个清单里不存在的名字：分组用例会自带三行 skill 夹具，
-   * 那份夹具里才有 `gbrain-status`；段头用例用的是下面这份基础清单。
+   * - `global` 关掉 MCP `gbrain`（全局黑名单，没有「开」的可能）。
+   * - `workspace` 关掉 skill `md-word-count`（本工程显式决定 ⇒ 与全局不同 ⇒ 标红）。
+   *
+   * 这样段头的两个数不相等（skill 段 2 项、1 项被关），任何「只显示总数」的实现
+   * 都会让断言失败。注意 `workspace` 里不要放清单里不存在的名字：分组用例会自带
+   * 三行 skill 夹具，那份夹具里才有 `gbrain-status`。
    */
-  policy: { mode: 'blacklist' as const, skills: ['md-word-count'], mcps: [] },
+  global: { mode: 'blacklist' as const, skills: [], mcps: ['gbrain'] },
+  workspace: { skills: { 'md-word-count': false }, mcps: {} },
   revision: 'r1',
   cwd: '/Users/go/proj/demo',
   policyPath: '/Users/go/proj/demo/.dsh-scope.json',
@@ -80,9 +83,6 @@ const workspaceValue = {
       { serverName: 'ghost', toolCount: 0, toolNames: [], source: 'global' as const, restrictable: true, loaded: false },
     ],
   },
-  /** 服务端算好的「继承自全局 / 全局已关闭」统计（不变量 5 的 UI 呈现）。 */
-  inherited: { total: 2, disabledGlobally: 1 },
-  disabledGlobally: ['gbrain'],
 }
 
 const fetchMock = vi.fn()
@@ -180,34 +180,48 @@ describe('WorkspaceModal', () => {
   })
 
   /**
-   * 被全局关闭的名字**不逐条列出**，而且**一个数也不报**（用户明确要求「完全不显示」）。
+   * 三态语义的承重用例：**全局关闭的项仍然被列出**。
    *
-   * 服务端已把它们从 `inventory` 整条摘除，所以 UI 里既不该出现可切换的行，
-   * 也不该出现一份只读名单，**也不该出现「被全局关闭 N 项」的计数**。
+   * 旧语义（2026-10-14）里服务端把它们从 `inventory` 整条摘除，UI 里既没有行也没有计数。
+   * 三态落地后这条必须反过来：题面要求「workspace 拿与全局一样的完整列表」，否则用户在
+   * 本工程里**没有入口**把全局关闭的项打开（按钮不存在，不是按钮点不动）。
    *
-   * 2026-10-14 两轮改动：①先删掉列表下方独立那句「另有 N 项被全局关闭，不在此列出。」，
-   * 计数并入顶部说明段；②随后按用户新文案把计数**彻底删除**（顶部说明改成
-   * 「下面是未被全局禁用的项, 改动对本 workspace 新 session 生效，不影响已有 session」）。
-   * 现在是终态：屏幕上不存在任何关闭项计数。
+   * 同时保留旧的两条**缺席**断言（不得再出现任何「被全局关闭 N 项」的计数或只读名单）：
+   * 完整列表不等于把内部记账摊给用户看。
    */
-  it('never renders a count of globally closed items', async () => {
+  it('lists a globally closed MCP row without marking it and reports no closed count', async () => {
     render(<WorkspaceModal sessionId="s1" onClose={() => {}} />)
 
     // 等面板加载完，否则空查询恒为 null，这条用例毫无意义。
     await screen.findByTestId('mcp-local-db')
+
+    // ① 行在（这是本次改动的新要求）。
+    const gbrain = screen.getByTestId('mcp-gbrain')
+    // ② 开关是关的：本工程没在 `workspace` 里表过态，所以跟着全局（全局关了它）。
+    expect(within(gbrain).getByRole('switch', { name: 'gbrain' }).getAttribute('aria-checked')).toBe('false')
+    // ③ 不标跨层差异：跟随全局 ≠ 改过全局。
+    expect(within(gbrain).queryByTestId('ws-overridden')).toBeNull()
+
+    // ④ 旧的缺席断言照旧。
     expect(screen.queryByTestId('globally-closed')).toBeNull()
     expect(document.body.textContent).not.toContain('被全局关闭')
     expect(document.body.textContent).not.toContain('另有')
-    /*
-     * 被关闭的是 **MCP server** `gbrain`，断言必须查「可切换的 skill 行」而不是
-     * `queryByText('gbrain')` —— 技能来源分组里有一个**同名的来源文件夹** `gbrain`
-     * （夹具的 skill 位于 `/Users/go/node_modules/gbrain/skills`），分组标题渲染出
-     * `gbrain` 是**正确行为**，与「全局关闭名单」无关。按名字做全页文本断言会把
-     * 两件不相干的事混在一起，夹具一变就误报。
-     */
-    expect(screen.queryByTestId('ws-skill-gbrain')).toBeNull()
-    // 也不该有任何只读徽标（那是旧折叠区的产物）。
     expect(screen.queryByText('被全局关闭（不可在此启用）')).toBeNull()
+  })
+
+  /**
+   * 反向对照：**真的改过全局的那一项必须标红**。
+   *
+   * 夹具里 `md-word-count` 在 `workspace` 里是 `false`，而全局开着它 ⇒ 跨层不一致。
+   * 没有这条，上一条用例「不标红」的断言在没有标记实现时也会通过。
+   */
+  it('marks a row whose state differs from the global setting', async () => {
+    render(<WorkspaceModal sessionId="s1" onClose={() => {}} />)
+
+    const overridden = await screen.findByTestId('ws-skill-md-word-count')
+    expect(within(overridden).getByTestId('ws-overridden').textContent).toBe('与全局不同')
+    // 跟随全局的那一项不标。
+    expect(within(screen.getByTestId('ws-skill-academic-verify')).queryByTestId('ws-overridden')).toBeNull()
   })
 
   /**
@@ -220,8 +234,50 @@ describe('WorkspaceModal', () => {
     render(<WorkspaceModal sessionId="s1" onClose={() => {}} />)
 
     expect(
-      await screen.findByText('下面是未被全局禁用的项, 改动对本 workspace 新 session 生效，不影响已有 session'),
+      await screen.findByText(
+        '初始默认继承全局配置；你可以覆盖修改 skill 开关状态，改动只对本 workspace 新开的会话生效。',
+      ),
     ).toBeTruthy()
+  })
+
+  /**
+   * 「与全局不同」视图按钮（2026-10-20 用户要求：在 已启用/已禁用 之后加一个）。
+   *
+   * 它问的是**跨层差异**，不是开关位置 —— 判据必须是 `row.overridden`。
+   * 夹具里 `md-word-count` 在 `workspace` 里被关（全局开着）⇒ 唯一一条不同；
+   * `gbrain` 在全局被关、本工程没表态 ⇒ 跟随，不进这个视图。
+   */
+  it('filters down to items that differ from the global setting', async () => {
+    render(<WorkspaceModal sessionId="s1" onClose={() => {}} />)
+
+    // 先等清单到齐，否则「点完不存在」与「本来就没有」分不清。
+    await screen.findByTestId('ws-skill-academic-verify')
+
+    await user.click(screen.getByTestId('view-overridden'))
+
+    // ① 改过全局的那一项还在。
+    expect(screen.getByTestId('ws-skill-md-word-count')).toBeTruthy()
+    // ② 跟随全局的技能被筛掉。
+    expect(screen.queryByTestId('ws-skill-academic-verify')).toBeNull()
+    // ③ 跟随全局的 MCP 也被筛掉（全局关了 gbrain，本工程没改它）。
+    expect(screen.queryByTestId('mcp-gbrain')).toBeNull()
+
+    // ④ 切回「全部」应当把两者都放回来 —— 视图只是谓词，不是一次删除。
+    await user.click(screen.getByTestId('view-all'))
+    expect(screen.getByTestId('ws-skill-academic-verify')).toBeTruthy()
+    expect(screen.getByTestId('mcp-gbrain')).toBeTruthy()
+  })
+
+  /**
+   * 反向对照：**全局层不许出现这个按钮**。
+   *
+   * 全局层没有「上一层」，「与全局不同」在那里无定义；真渲染了只会得到一个永远空着的列表。
+   */
+  it('renders the overridden view button in the workspace bar only', async () => {
+    render(<WorkspaceModal sessionId="s1" onClose={() => {}} />)
+
+    const bar = await screen.findByTestId('view-row')
+    expect(within(bar).getByTestId('view-overridden').textContent).toBe('与全局不同')
   })
 
   it('shows the workspace title with the project name', async () => {
@@ -230,9 +286,9 @@ describe('WorkspaceModal', () => {
     expect(await screen.findByText('本工程能力 · 只影响 demo')).toBeTruthy()
   })
 
-  it('saves through the workspace route and merges only revision and policy', async () => {
+  it('saves through the workspace route and merges only revision and workspace', async () => {
     /*
-     * 承重不变量：保存响应**只合并 `revision` 与 `policy`**，绝不整体替换视图。
+     * 承重不变量：保存响应**只合并 `revision` 与 `workspace`**，绝不整体替换视图。
      *
      * 这里故意让保存响应回吐一份「什么都变了」的完整视图 —— 也就是本仓库 host 侧
      * `src/routes/handlers.ts` 的真实行为（它的 `exists` 与 `cwd` 都是**写文件之前**采集的
@@ -250,7 +306,8 @@ describe('WorkspaceModal', () => {
         return jsonOk({ ok: true, value: { ...workspaceValue, exists: false } })
       }
       expect(String(url)).toBe('/api/skill-scope/workspace/save')
-      expect(String(init?.body ?? '')).toContain('"mode":"blacklist"')
+      // 三态请求体发的是**逐项表**，不是黑名单数组，也不再带 `mode`。
+      expect(String(init?.body ?? '')).toContain('"workspace"')
       // 回吐一份「什么都变了」的视图：revision 与 cwd 都与读取时不同。
       return jsonOk({ ok: true, value: { ...workspaceValue, exists: true, revision: 'r2', cwd: '/elsewhere' } })
     })
@@ -445,8 +502,8 @@ describe('WorkspaceModal · 卡片版式（目标效果对齐）', () => {
      * **不渲染**，而不是渲染成「来源：（空）」——后者是一条无信息的噪音行，
      * 还会让用户以为这里本该有内容却没加载出来。
      *
-     * 用 `mcp-local-db` 而不是 `mcp-gbrain`：后者在夹具的 `disabledGlobally` 里，
-     * 已被服务端从清单摘除，取不到卡片。
+     * 用 `mcp-local-db`（本层启用中）而不是 `mcp-gbrain`（跟随全局、处于关态），
+     * 避免把「来源行缺失」和「开关关着」两件事混在一起。
      */
     fetchMock.mockResolvedValueOnce(jsonOk({ ok: true, value: workspaceValue }))
     render(<WorkspaceModal sessionId="s1" onClose={() => {}} />)
@@ -538,7 +595,7 @@ describe('WorkspaceModal · 卡片版式（目标效果对齐）', () => {
 
     await screen.findByTestId('ws-skill-academic-verify')
     expect(screen.getByTestId('ws-skill-count').textContent).toBe('1/2 项')
-    expect(screen.getByTestId('mcp-count').textContent).toBe('2/2 项')
+    expect(screen.getByTestId('mcp-count').textContent).toBe('2/3 项')
 
     await userEvent.type(screen.getByRole('searchbox'), 'academic')
     // skill 段只剩 1 项且它启用 → `1/1`，分母跟着变小。
@@ -615,13 +672,13 @@ describe('WorkspaceModal skill grouping', () => {
   /**
    * 三行分属两组，用来验证分组渲染与「每组独立折叠」。
    *
-   * `policy` 必须**自己重述**：下面把 `inventory.skills` 换成另一批名字，
-   * 若沿用基础夹具的策略，被关掉的名字就不在这批里 —— 组头计数会退化成 `2/2`，
+   * `workspace` 必须**自己重述**：下面把 `inventory.skills` 换成另一批名字，
+   * 若沿用基础夹具的逐项表，被关掉的名字就不在这批里 —— 组头计数会退化成 `2/2`，
    * 「只显示总数的写法」也能让它通过。
    */
   const groupedValue = {
     ...workspaceValue,
-    policy: { mode: 'blacklist' as const, skills: ['gbrain-status'], mcps: [] },
+    workspace: { skills: { 'gbrain-status': false }, mcps: {} },
     inventory: {
       ...workspaceValue.inventory,
       skills: [
@@ -639,7 +696,7 @@ describe('WorkspaceModal skill grouping', () => {
     // 组名取服务端算好的 `groupLabel`（插件名 / 文件夹名），不是绝对路径。
     const gbrain = await screen.findByTestId('group:/r/gbrain/skills')
     expect(within(gbrain).getByText('gbrain')).toBeTruthy()
-    // 计数是 `启用/总量`。夹具里 `gbrain-status` 已被关掉（见 `groupedValue.policy`），
+    // 计数是 `启用/总量`。夹具里 `gbrain-status` 已被关掉（见 `groupedValue.workspace`），
     // 所以是 `1/2` 而不是 `2`——只显示总数看不出组里有几项被关。
     expect(within(gbrain).getByText('1/2')).toBeTruthy()
     expect(within(gbrain).getByTestId('ws-skill-gbrain-status')).toBeTruthy()

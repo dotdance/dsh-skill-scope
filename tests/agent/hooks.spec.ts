@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { installAgentHooks, type HookDeps } from '../../src/agent/hooks.ts'
 import { AgentStates, type AgentLike } from '../../src/agent/state.ts'
 import { EMPTY_POLICY, type LayerPolicy } from '../../src/policy/schema.ts'
-import type { LoadResult, SaveOutcome } from '../../src/policy/store.ts'
+import { EMPTY_WORKSPACE_POLICY, type WorkspacePolicy } from '../../src/policy/workspace-schema.ts'
+import type { LoadResult, SaveOutcome, WorkspaceLoadResult } from '../../src/policy/store.ts'
 import type { SkillsServiceLike } from '../../src/inventory/skills.ts'
 import type { McpToolFace } from '../../src/inventory/mcp.ts'
 import { emit as emitEvent, makeFakeCtx, type FakeContext } from '../support/fake-ctx.ts'
@@ -87,16 +88,16 @@ function makeSkills(options: {
 }
 
 /** 一个策略 store 替身：内存态，可注入失败。 */
-function makeStore(state: { global: LayerPolicy; workspace: LayerPolicy | null; fail?: boolean }) {
+function makeStore(state: { global: LayerPolicy; workspace: WorkspacePolicy | null; fail?: boolean }) {
   return {
     loadGlobal: async (): Promise<LoadResult> => {
       if (state.fail === true) throw new Error('store exploded')
       return { policy: state.global, revision: 'r-g', exists: true }
     },
-    loadWorkspace: async (): Promise<LoadResult & { path: string }> => {
+    loadWorkspace: async (): Promise<WorkspaceLoadResult> => {
       if (state.fail === true) throw new Error('store exploded')
       return {
-        policy: state.workspace ?? EMPTY_POLICY,
+        policy: state.workspace ?? EMPTY_WORKSPACE_POLICY,
         revision: state.workspace === null ? null : 'r-w',
         exists: state.workspace !== null,
         path: '/proj/.dsh-scope.json',
@@ -121,7 +122,7 @@ function fullDefinition(name: string): Record<string, unknown> {
 /** 组装一套 HookDeps 与它的可观测替身。 */
 function makeHarness(options: {
   global?: LayerPolicy
-  workspace?: LayerPolicy | null
+  workspace?: WorkspacePolicy | null
   globalSkills?: string[]
   agentSkills?: string[]
   complete?: boolean
@@ -262,7 +263,7 @@ describe('installAgentHooks', () => {
   it('applies the shadow and the restriction at creation, before the first assembly', async () => {
     const ctx = makeFakeCtx() as unknown as Context & FakeContext
     const harness = makeHarness({
-      workspace: { mode: 'blacklist', skills: ['demo'], mcps: [] },
+      workspace: { skills: { demo: false }, mcps: {} },
     })
     installAgentHooks(ctx, harness.deps)
     await fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })
@@ -292,13 +293,9 @@ describe('installAgentHooks', () => {
     expect(harness.states.get('a1')?.policy).not.toBeNull()
 
     // 保存后 store 返回新策略，且变化通过 skills/change 到达。
-    harness.state.workspace = { mode: 'blacklist', skills: ['other'], mcps: [] }
+    harness.state.workspace = { skills: { other: false }, mcps: {} }
     await fire(ctx, 'skills/change', {})
-    expect(harness.states.get('a1')?.policy?.workspace).toEqual({
-      mode: 'blacklist',
-      skills: ['other'],
-      mcps: [],
-    })
+    expect(harness.states.get('a1')?.policy?.workspace).toEqual({ skills: { other: false }, mcps: {} })
   })
 
   /**
@@ -319,16 +316,12 @@ describe('installAgentHooks', () => {
       expect(harness.states.get('a1')?.policy).not.toBeNull()
     })
 
-    harness.state.workspace = { mode: 'blacklist', skills: ['other'], mcps: [] }
+    harness.state.workspace = { skills: { other: false }, mcps: {} }
     // 宿主 `dsh-skill` 的 `notifyChange()` 实际发出的名字。
     ctx.emit('skills/change')
     // 回调是 async 且经 serial 链派发；等链尾跑完。
     await vi.waitFor(() => {
-      expect(harness.states.get('a1')?.policy?.workspace).toEqual({
-        mode: 'blacklist',
-        skills: ['other'],
-        mcps: [],
-      })
+      expect(harness.states.get('a1')?.policy?.workspace).toEqual({ skills: { other: false }, mcps: {} })
     })
   })
 
@@ -357,7 +350,7 @@ describe('installAgentHooks', () => {
   it('releases shadows and restrictions on agent/disposed', async () => {
     const ctx = makeFakeCtx() as unknown as Context & FakeContext
     const harness = makeHarness({
-      workspace: { mode: 'blacklist', skills: ['demo'], mcps: ['gbrain'] },
+      workspace: { skills: { demo: false }, mcps: { gbrain: false } },
     })
     installAgentHooks(ctx, harness.deps)
     await fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })
@@ -376,7 +369,7 @@ describe('installAgentHooks', () => {
   it('releases everything when the plugin unloads', async () => {
     const ctx = makeFakeCtx() as unknown as Context & FakeContext
     const harness = makeHarness({
-      workspace: { mode: 'blacklist', skills: ['demo'], mcps: ['gbrain'] },
+      workspace: { skills: { demo: false }, mcps: { gbrain: false } },
     })
     const stop = installAgentHooks(ctx, harness.deps)
     await fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })

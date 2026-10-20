@@ -15,6 +15,7 @@ export const zh = {
   'view.all': '全部',
   'view.enabled': '已启用',
   'view.disabled': '已禁用',
+  'view.overridden': '与全局不同',
   'section.skills': 'Skill',
   'section.mcps': 'MCP',
   'search.placeholder': '搜索',
@@ -29,6 +30,7 @@ export const zh = {
   'state.scope': '本作用域',
   'state.enabled': '已启用',
   'state.disabled': '已禁用',
+  'state.overridden': '与全局不同',
   'action.expand': '展开',
   'action.collapse': '收起',
   'detail.state': '状态',
@@ -44,7 +46,7 @@ export const zh = {
   // 只读行不渲染任何原因文案（「未加载」「只读」等），只由「没有开关」这一事实体现。
   // 这句文案是与用户确认过的措辞，不要按「已有会话的下一回合也会生效」之类的推论去改它 ——
   // 该推论未经实测，且与用户明确要求冲突。
-  'workspace.intro': '下面是未被全局禁用的项, 改动对本 workspace 新 session 生效，不影响已有 session',
+  'workspace.intro': '初始默认继承全局配置；你可以覆盖修改 skill 开关状态，改动只对本 workspace 新开的会话生效。',
   // 弹层顶部那段说明末尾追加的计数。数的是 **skill + MCP 合计**被全局关掉了几项：
   // 用户关心的是「被全局挡在门外的一共有多少」，而不是它归哪一段管 —— 分开两处报数
   // 会让同一件事在两个地方各说一半。
@@ -65,6 +67,7 @@ export const en: Record<keyof typeof zh, string> = {
   'view.all': 'All',
   'view.enabled': 'Enabled',
   'view.disabled': 'Disabled',
+  'view.overridden': 'Differs from global',
   'section.skills': 'Skills',
   'section.mcps': 'MCP',
   'search.placeholder': 'Search',
@@ -79,6 +82,7 @@ export const en: Record<keyof typeof zh, string> = {
   'state.scope': 'This scope',
   'state.enabled': 'Enabled',
   'state.disabled': 'Disabled',
+  'state.overridden': 'Differs from global',
   'action.expand': 'Expand',
   'action.collapse': 'Collapse',
   'detail.state': 'State',
@@ -87,5 +91,5 @@ export const en: Record<keyof typeof zh, string> = {
   'detail.originRuntime': 'Runtime-injected (no file on disk)',
   'count.unit': 'items',
   'group.ungrouped': 'Runtime-injected',
-  'workspace.intro': 'Listed below are the items not disabled globally. Changes apply to new sessions in this workspace; existing sessions are unaffected.',
+  'workspace.intro': 'By default everything inherits the global configuration; you can override any skill switch here. Changes apply only to new sessions in this workspace.',
 }

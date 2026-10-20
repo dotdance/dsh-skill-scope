@@ -41,6 +41,14 @@ export interface CapabilityRow {
   tools?: string[]
   enabled: boolean
   /**
+   * 这一行在本层被**显式改过**，且改的方向与上层（全局）不同。
+   *
+   * 只有工作区弹层会挂它：全局层没有上层，跨层差异无从谈起。挂上时卡片显然要给出
+   * 视觉标记（`overriddenLabel` 的红色标签），否则用户看不出「这一项是我在本工程改的」
+   * 还是「它本来就是这样」——两者在列表里长得完全一样。
+   */
+  overridden?: boolean
+  /**
    * `true` 时**不渲染开关**（不变量 22/26：loader-only 或 restrictable:false 的行只读）。
    * 只读这一事实只由「没有开关」体现，卡片上不展示任何原因文案。
    */
@@ -82,6 +90,13 @@ export interface CapabilityListProps {
   /** 已启用/已禁用状态 tag 的文案。 */
   enabledLabel: string
   disabledLabel: string
+  /**
+   * 「与全局不同」标记的文案（红色 tag）。
+   *
+   * 只有工作区弹层会出现这个标记；全局面板照样传一个——与其它标签同理，
+   * 少传一处就会在那一处渲染出一个空 tag。
+   */
+  overriddenLabel: string
   /** 展开详情里「状态」这一行的键名。 */
   detailStateKey: string
   /** 展开详情里「来源」这一行的键名。 */
@@ -263,6 +278,17 @@ function CapabilityCard(props: CapabilityListProps & { row: CapabilityRow; testI
           </span>
         </div>
         <div className={styles.cardTail}>
+          {/*
+            跨层差异标记：只在工作区弹层出现（全局层从不设置 `overridden`）。
+            **颜色留给「跨层不一致」这一件事**，不表示错误——红色在这里是强调，
+            状态本身仍由开关位置与 `stateText` 表达。这也照顾色弱用户：不必分辨红绿，
+            读一眼文字「与全局不同」即可。
+          */}
+          {row.overridden === true ? (
+            <span className={styles.overridden} data-testid="ws-overridden" title={props.overriddenLabel}>
+              <Tag tone="danger">{props.overriddenLabel}</Tag>
+            </span>
+          ) : null}
           <Tag tone={row.enabled ? 'success' : 'neutral'}>{stateText}</Tag>
           <button
             type="button"

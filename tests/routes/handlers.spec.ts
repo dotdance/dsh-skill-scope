@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { EMPTY_POLICY } from '../../src/policy/schema.ts'
+import { EMPTY_WORKSPACE_POLICY } from '../../src/policy/workspace-schema.ts'
 import { PolicyStore, type PolicyFsLike } from '../../src/policy/store.ts'
 import { globalPolicyPath, workspacePolicyPath } from '../../src/policy/paths.ts'
 import { AgentStates, reground, type AgentLike } from '../../src/agent/state.ts'
@@ -357,7 +358,8 @@ describe('handleWorkspace', () => {
     const out = await handleWorkspace({ sessionId: 's1' }, orphan)
     expect(out).toMatchObject({ ok: true, value: { live: false, exists: false, cwd } })
     if (out.ok) {
-      expect(out.value.policy).toEqual(EMPTY_POLICY)
+      // 没有文件 ⇒ 工作区层是空表（= 完全跟随全局），不是一份「黑名单」。
+      expect(out.value.workspace).toEqual(EMPTY_WORKSPACE_POLICY)
       expect(out.value.policyPath).toBe(workspacePolicyPath(cwd))
     }
   })
@@ -432,12 +434,15 @@ describe('handleWorkspaceSave', () => {
     const agent = makeAgent('s1', cwd)
     const { deps, files } = makeDeps({ agent })
     const out = await handleWorkspaceSave(
-      { sessionId: 's1', mode: 'blacklist', skills: ['a'], mcps: [], revision: null },
+      { sessionId: 's1', workspace: { skills: { a: false }, mcps: {} }, revision: null },
       deps,
     )
     expect(out).toMatchObject({ ok: true, value: { cwd, exists: true, live: true } })
     if (out.ok) expect(out.value.revision).toMatch(/^[0-9a-f]{64}$/)
-    expect(files.get(workspacePolicyPath(cwd))).toContain('"blacklist"')
+    // 落盘是新形状：`workspace` 行 + 逐项布尔，没有 `mode`。
+    expect(JSON.parse(files.get(workspacePolicyPath(cwd))!)).toEqual({
+      workspace: { skills: { a: false } },
+    })
   })
 
   it('reports live:false on a save for a session with no live agent', async () => {
@@ -446,7 +451,7 @@ describe('handleWorkspaceSave', () => {
     const orphan: RouteDeps = { ...deps, ctx: ctxWithoutAgent(deps.ctx, 's1', cwd) }
     expect(
       await handleWorkspaceSave(
-        { sessionId: 's1', mode: 'blacklist', skills: ['a'], mcps: [], revision: null },
+        { sessionId: 's1', workspace: { skills: { a: false }, mcps: {} }, revision: null },
         orphan,
       ),
     ).toMatchObject({ ok: true, value: { live: false, exists: true } })
@@ -454,7 +459,7 @@ describe('handleWorkspaceSave', () => {
 
   it('rejects a workspace save for an unknown session', async () => {
     const { deps } = makeDeps()
-    expect(await handleWorkspaceSave({ sessionId: 'nope', mode: 'default', skills: [], mcps: [] }, deps)).toEqual({
+    expect(await handleWorkspaceSave({ sessionId: 'nope', workspace: { skills: {}, mcps: {} } }, deps)).toEqual({
       ok: false,
       error: { code: 'unknown-session', message: expect.any(String) },
     })
@@ -472,7 +477,7 @@ describe('handleWorkspaceSave', () => {
     const agent = makeAgent('s1', cwd)
     const { deps, reapplyCalls } = makeDeps({ agent })
     const out = await handleWorkspaceSave(
-      { sessionId: 's1', mode: 'blacklist', skills: ['a'], mcps: [], revision: null },
+      { sessionId: 's1', workspace: { skills: { a: false }, mcps: {} }, revision: null },
       deps,
     )
     expect(out.ok).toBe(true)
@@ -483,8 +488,10 @@ describe('handleWorkspaceSave', () => {
     const agent = makeAgent('s1', cwd)
     const { deps, reapplyCalls } = makeDeps({ agent })
     const out = await handleWorkspaceSave(
-      // 非法名字：`validatePolicyInput` 直接拒绝，不应走到重新落地。
-      { sessionId: 's1', mode: 'blacklist', skills: ['Not A Valid Name'], mcps: [], revision: null },
+      // 值不是布尔：`validateWorkspaceInput` 直接拒绝，不应走到重新落地。
+      // 注意**不要**用「名字形状不合法」来造拒绝——工作区层刻意不校验名字形状，
+      // 因为名字可能属于还没装的技能，删掉它就是删掉用户的决定。
+      { sessionId: 's1', workspace: { skills: { a: 'yes' } }, revision: null },
       deps,
     )
     expect(out.ok).toBe(false)
@@ -681,7 +688,7 @@ describe('registerRoutes', () => {
       const { deps } = makeDeps({ agent, skills })
 
       const saved = await handleWorkspaceSave(
-        { sessionId: 's1', mode: 'blacklist', skills: ['invocable-one'], mcps: [], revision: null },
+        { sessionId: 's1', workspace: { skills: { 'invocable-one': false }, mcps: {} }, revision: null },
         deps,
       )
       const read = await handleWorkspace({ sessionId: 's1' }, deps)
@@ -727,7 +734,7 @@ describe('registerRoutes', () => {
         hiddenIn: ['closed-here'],
       })
       await handleWorkspaceSave(
-        { sessionId: 'session-live', mode: 'blacklist', skills: ['closed-here'], mcps: [], revision: null },
+        { sessionId: 'session-live', workspace: { skills: { 'closed-here': false }, mcps: {} }, revision: null },
         deps,
       )
 
@@ -738,10 +745,17 @@ describe('registerRoutes', () => {
     })
 
     /**
-     * 全局硬上限优先于「补回」：全局已关闭的项**不**因它同时出现在工作区黑名单里
-     * 而被补回。两层名单都能命中一个名字时，全局层说了算（工作区只能收窄）。
+     * 全局关掉的项**照样列出**（三态语义，2026-10-20 起）。
+     *
+     * 旧语义下这里是「全局是硬上限，两侧都关的项不补回，工作区只能收窄」。
+     * 新语义下全局只是**默认值**：这一行必须出现在面板上，否则用户在本工程里
+     * 找不到入口把它打开——而「能打开」正是本次改动要的东西。
+     *
+     * 因此本用例现在断言的是它的反面：名字在清单里，且**仍然生效为关闭**
+     * （没有任何一层说它开着）。两者缺一不可：只断言「在清单里」会让
+     * 「列出来但被当成开着」这种错误通过。
      */
-    it('does not restore a skill that is also closed globally', async () => {
+    it('keeps a globally closed skill listed instead of hiding it', async () => {
       const agent = makeAgent('session-live', cwd)
       const { deps } = makeDeps({
         agent,
@@ -753,14 +767,19 @@ describe('registerRoutes', () => {
         deps,
       )
       await handleWorkspaceSave(
-        { sessionId: 'session-live', mode: 'blacklist', skills: ['closed-both'], mcps: [], revision: null },
+        { sessionId: 'session-live', workspace: { skills: { 'closed-both': false }, mcps: {} }, revision: null },
         deps,
       )
 
       const out = await handleWorkspace({ sessionId: 'session-live' }, deps)
       if (!out.ok) throw new Error('expected ok')
-      expect(out.value.inventory.skills.map((row) => row.name)).toEqual(['kept'])
-      expect(out.value.disabledGlobally).toContain('closed-both')
+      // 仍然列出：用户要能在这里点开它。
+      expect(out.value.inventory.skills.map((row) => row.name)).toEqual(['kept', 'closed-both'])
+      // 但生效状态仍是「关」：全局关了它，本工程没有任何一层说「开」。
+      // 返回体必须把两层的原始决定都交给客户端，否则面板算不出红标。
+      expect(out.value.global.skills).toContain('closed-both')
+      // 本层的 `false` 与全局同向，保存时已被剔除 ⇒ 键不存在 = 跟随全局（也是关）。
+      expect(out.value.workspace.skills['closed-both']).toBeUndefined()
     })
 
     /**
@@ -783,7 +802,7 @@ describe('registerRoutes', () => {
         hiddenIn: ['closed-here'],
       })
       await handleWorkspaceSave(
-        { sessionId: 'session-live', mode: 'blacklist', skills: ['closed-here'], mcps: [], revision: null },
+        { sessionId: 'session-live', workspace: { skills: { 'closed-here': false }, mcps: {} }, revision: null },
         deps,
       )
 
@@ -831,7 +850,7 @@ describe('registerRoutes', () => {
         hiddenIn: ['ghost'],
       })
       await handleWorkspaceSave(
-        { sessionId: 'session-live', mode: 'blacklist', skills: ['kept', 'ghost'], mcps: [], revision: null },
+        { sessionId: 'session-live', workspace: { skills: { kept: false, ghost: false }, mcps: {} }, revision: null },
         deps,
       )
 
@@ -843,17 +862,21 @@ describe('registerRoutes', () => {
   })
 
   /**
-   * 全局层是**硬上限**（设计 `docs/design.md` §1.2）。
+   * **全局层只是默认值**（2026-10-20 语义变更，取代原「全局层是硬上限」）。
    *
-   * 回归防护（用户实测缺陷）：曾经 `handleWorkspace` 直接返回作用域清单，**不减全局黑名单**，
-   * 表现为「全局关闭了大部分 skill，工作区面板还是能看到全部」。实测 61 项里有 59 项已被
-   * 全局关闭却照常显示，且 `disabledGlobally` / `inherited` 两个字段整个缺失。
+   * 旧语义（本组用例原来的写法）：全局关闭的项在工作区面板上**完全不显示**，
+   * 工作区只能把全局的开着的项关掉，反方向不可能。
    *
-   * 用户对呈现方式的选择：全局已关闭的项在工作区**完全不显示**（不折叠、不列只读名单），
-   * 只留一句计数。所以这里断言的是「不在清单里」而不是「在某个只读区里」。
+   * 新语义：全局层是**默认值**。全局关掉的项照样列在面板上，用户可以在本工程里
+   * 把它打开；反过来也可以把全局开着的项关掉。返回体因此带**两份策略**
+   * （`global` + `workspace`），客户端据 `workspace[名字] ?? !global.includes(名字)`
+   * 算最终状态与红标。
+   *
+   * 为什么必须「照样列出来」：只放开显示而不给能力，就是一排按不动的死按钮；
+   * 只给能力而不显示，用户连按钮都看不见。两件事是一对，必须同时成立。
    */
-  describe('global layer is a hard ceiling for the workspace', () => {
-    it('removes globally blacklisted skills from the workspace inventory', async () => {
+  describe('the global layer is a default, not a ceiling', () => {
+    it('keeps globally closed skills listed and reports both layers', async () => {
       const agent = makeAgent('session-live', cwd)
       const { deps } = makeDeps({
         agent,
@@ -866,54 +889,113 @@ describe('registerRoutes', () => {
 
       const out = await handleWorkspace({ sessionId: 'session-live' }, deps)
       if (!out.ok) throw new Error('expected ok')
-      expect(out.value.inventory.skills.map((row) => row.name)).toEqual(['kept', 'also-kept'])
-      expect(out.value.disabledGlobally).toEqual(['closed-globally'])
+      // 一项都不少：全局关掉的 `closed-globally` 仍在清单里。
+      expect(out.value.inventory.skills.map((row) => row.name)).toEqual([
+        'kept',
+        'closed-globally',
+        'also-kept',
+      ])
+      // 两份策略都要给全：客户端靠它们算「这一行是否与全局不同」。
+      expect(out.value.global).toEqual({ mode: 'blacklist', skills: ['closed-globally'], mcps: [] })
+      expect(out.value.workspace).toEqual(EMPTY_WORKSPACE_POLICY)
+      // 旧字段已删除。留着它们会让客户端继续按「被摘掉」的假设渲染。
+      expect(out.value).not.toHaveProperty('disabledGlobally')
+      expect(out.value).not.toHaveProperty('inherited')
     })
 
-    it('removes globally blacklisted mcps and reports them in disabledGlobally', async () => {
+    it('lets the workspace open a skill the global layer closed', async () => {
+      const agent = makeAgent('session-live', cwd)
+      const { deps, files } = makeDeps({
+        agent,
+        skills: [{ name: 'closed-globally' }],
+        // 全局关闭会遮蔽它：agent 作用域的活清单里它已经 `modelInvocable:false`。
+        hiddenIn: ['closed-globally'],
+      })
+      await handleGlobalSave(
+        { mode: 'blacklist', skills: ['closed-globally'], mcps: [], revision: null },
+        deps,
+      )
+      const saved = await handleWorkspaceSave(
+        { sessionId: 'session-live', workspace: { skills: { 'closed-globally': true } }, revision: null },
+        deps,
+      )
+      expect(saved.ok).toBe(true)
+      if (!saved.ok) return
+      // 本层的 `true` 与全局异向 ⇒ 必须落盘（同向条目才剔除）。
+      expect(JSON.parse(files.get(workspacePolicyPath(cwd))!)).toEqual({
+        workspace: { skills: { 'closed-globally': true } },
+      })
+      // 回读时这一行仍在，且本层带着 `true`：面板据此把它显示为「已在本工程打开」+ 红标。
+      expect(saved.value.workspace.skills).toEqual({ 'closed-globally': true })
+      expect(saved.value.global.skills).toEqual(['closed-globally'])
+      expect(saved.value.inventory.skills.map((row) => row.name)).toEqual(['closed-globally'])
+    })
+
+    it('keeps globally closed mcps listed so the workspace can reopen them', async () => {
       const agent = makeAgent('session-live', cwd)
       const { deps } = makeDeps({ agent, tools: ['mcp__gbrain__search', 'mcp__other__ping'] })
       await handleGlobalSave({ mode: 'blacklist', skills: [], mcps: ['gbrain'], revision: null }, deps)
 
       const out = await handleWorkspace({ sessionId: 'session-live' }, deps)
       if (!out.ok) throw new Error('expected ok')
-      expect(out.value.inventory.mcps.map((row) => row.serverName)).not.toContain('gbrain')
-      expect(out.value.disabledGlobally).toContain('gbrain')
+      // 与 skill 侧同一条规则：不摘除任何行。
+      expect(out.value.inventory.mcps.map((row) => row.serverName)).toContain('gbrain')
+      expect(out.value.global.mcps).toEqual(['gbrain'])
+      expect(out.value.workspace.mcps).toEqual({})
     })
 
     /**
-     * `inherited.total` 必须等于**实际列给用户的**继承项数。
-     * 若在摘除前统计，UI 会显示「继承自全局：2 项」而列表里只有 1 行。
-     */
-    it('counts inherited totals after the global removals', async () => {
-      const agent = makeAgent('session-live', cwd)
-      const { deps } = makeDeps({ agent, tools: ['mcp__gbrain__search', 'mcp__other__ping'] })
-      await handleGlobalSave({ mode: 'blacklist', skills: [], mcps: ['gbrain'], revision: null }, deps)
-
-      const out = await handleWorkspace({ sessionId: 'session-live' }, deps)
-      if (!out.ok) throw new Error('expected ok')
-      const fromGlobal = out.value.inventory.mcps.filter((row) => row.source === 'global')
-      expect(out.value.inherited?.total).toBe(fromGlobal.length)
-      expect(out.value.inherited?.disabledGlobally).toBe(1)
-    })
-
-    /**
-     * 白名单删除前的行为：`whitelist` 下无法枚举「未出现的名字」，所以
-     * `closedByGlobal` 只能返回空集合，工作区层面因此看不到任何继承的隐藏项。
+     * 反方向同样成立：全局**开着**的项可以被本工作区关掉。
      *
-     * 删除白名单后这条缺口**已闭合**：名单永远可枚举，「全局关了哪些」有确切答案。
-     * 本用例因此翻转为它的反面——同样的输入（名单里只有 `listed`）现在读作
-     * 「listed 被全局关闭」，工作区层面必须如实摘除它，而不是整份清单照旧可见。
+     * 这条与上面「打开」那条是一对。只测一个方向时，把求值写成
+     * `local || 全局` 或 `全局 && local` 这类错误都能蒙混过关。
      */
-    it('hides exactly the globally listed names (the un-enumerable gap is closed)', async () => {
+    it('lets the workspace close a skill the global layer left open', async () => {
       const agent = makeAgent('session-live', cwd)
-      const { deps } = makeDeps({ agent, skills: [{ name: 'listed' }, { name: 'not-listed' }] })
-      await handleGlobalSave({ mode: 'blacklist', skills: ['listed'], mcps: [], revision: null }, deps)
+      const { deps, files } = makeDeps({ agent, skills: [{ name: 'open-globally' }] })
 
-      const out = await handleWorkspace({ sessionId: 'session-live' }, deps)
+      const saved = await handleWorkspaceSave(
+        { sessionId: 'session-live', workspace: { skills: { 'open-globally': false } }, revision: null },
+        deps,
+      )
+      expect(saved.ok).toBe(true)
+      if (!saved.ok) return
+      expect(JSON.parse(files.get(workspacePolicyPath(cwd))!)).toEqual({
+        workspace: { skills: { 'open-globally': false } },
+      })
+      expect(saved.value.workspace.skills).toEqual({ 'open-globally': false })
+      expect(saved.value.global.skills).toEqual([])
+    })
+
+    /**
+     * 清单来源必须是**并集**：全局清单 ∪ 活清单。
+     *
+     * `browser-skill` 这类自注册项在全局快照里存在、在 agent 活清单里也存在，但
+     * **只在活清单里**出现的项（会话运行时注入的）同样必须列出来——用户要能关掉它。
+     * 若把并集退化成「只用全局清单」，这些项就没有开关了。
+     */
+    it('unions the global inventory with the live scoped inventory', async () => {
+      const agent = makeAgent('session-live', cwd)
+      const { deps } = makeDeps({ agent, skills: [{ name: 'in-global' }] })
+      const patched: RouteDeps = {
+        ...deps,
+        skills: {
+          snapshot: async (snapshotOptions: { scope?: unknown } = {}) => ({
+            skills:
+              snapshotOptions.scope === undefined
+                ? [{ name: 'in-global', description: '', source: 'custom', provider: 'filesystem' }]
+                : [
+                    { name: 'in-global', description: '', source: 'custom', provider: 'filesystem' },
+                    { name: 'injected-only', description: '', source: 'custom', provider: 'filesystem' },
+                  ],
+            complete: true,
+          }),
+        },
+      }
+
+      const out = await handleWorkspace({ sessionId: 'session-live' }, patched)
       if (!out.ok) throw new Error('expected ok')
-      expect(out.value.inventory.skills.map((row) => row.name)).toEqual(['not-listed'])
-      expect(out.value.disabledGlobally).toEqual(['listed'])
+      expect(out.value.inventory.skills.map((row) => row.name)).toEqual(['in-global', 'injected-only'])
     })
   })
 })
