@@ -34,8 +34,6 @@ export interface ApplySkillShadowInput {
   logger: { warn(message: string): void }
   /** 上一轮的释放函数；新一轮先释放它，才能让「同名换定义」真的替换。 */
   previous?: () => void
-  /** 测试便利：给出定义表时，替身 `skills.get` 从这里取。 */
-  definitions?: Record<string, Record<string, unknown>>
   /** 打开后做「全新读一次清单」的复验；发现仍有未关上的项只 `logger.warn`，不回滚、不抛错。 */
   verifyStillVisible?: boolean
   /**

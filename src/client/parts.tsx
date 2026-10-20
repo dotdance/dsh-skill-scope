@@ -1,7 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 import styles from './styles.module.css'
-import { asRecord } from '../shared/unknown.ts'
 
 /**
  * 面板共享的展示逻辑与小组件。
@@ -19,7 +18,7 @@ export interface CapabilityRow {
   source: string
   /**
    * 该能力的**出处**：插件名（如 `superpowers-dsh`）或磁盘注册根绝对路径
-   * （如 `/Users/go/node_modules/gbrain/skills`）。
+   * （如 `~/node_modules/gbrain/skills`）。
    *
    * **与 `source` 是两个不同的字段，不可合并**：`source` 回答「这一行是全局层还是
    * 本作用域」（取值 `global`/`scope`，MCP 段在用），这里回答「这个东西是谁提供的」。
@@ -139,7 +138,7 @@ function escapeRegExp(text: string): string {
 }
 
 /** 一个内联 SVG 箭头（chevron）。**不引第三方图标库**：宿主模块表里没有它，引了会多打一份包。 */
-export function Chevron(props: { open: boolean; className?: string }): ReactNode {
+function Chevron(props: { open: boolean; className?: string }): ReactNode {
   return (
     <svg
       className={props.className}
@@ -341,7 +340,7 @@ function CapabilityCard(props: CapabilityListProps & { row: CapabilityRow; testI
               <span className={styles.detailKey}>{props.detailSourceKey}</span>
               {/*
                 值用 `.detailOrigin` 而不是 `.detailValue`：它可能是长绝对路径，需要任意位置
-                断行，否则一条 `/Users/go/node_modules/gbrain/skills` 会把详情行撑出卡片。
+                断行。
                 `title` 保留完整值：路径换行后仍可悬停看全文，也可选中复制。
               */}
               {row.origin === undefined ? (
@@ -357,23 +356,6 @@ function CapabilityCard(props: CapabilityListProps & { row: CapabilityRow; testI
       ) : null}
     </li>
   )
-}
-
-/**
- * 一段可切换能力列表。
- *
- * **不变量 21（承重）**：这里**没有**按名字自由添加的输入框。用户只能切换清单里**已经存在**
- * 的名字；添加不存在的名字既没有输入口，也没有对应的写入字段。搜索框只做**过滤**，不产生新条目。
- *
- * 版式：分区头（标题 + 计数 + 折叠箭头）→ 两列卡片网格。搜索框在面板顶部统一渲染，
- * 本组件只接收 `externalQuery` 做过滤，因此「技能」与「MCP」被同一个词同时过滤。
- *
- * **来源分组（可选）**：当每一行都带 `group` 时，卡片不再平铺，而是按组渲染成若干
- * 可独立折叠的小节（见 `SkillGroups`）。只要有一行缺 `group`，整段就保持扁平 ——
- * 这样 MCP 段与工作区弹层的 MCP 段自动不受影响，两个面板共用同一段实现。
- */
-export function CapabilityList(props: CapabilityListProps): ReactNode {
-  return <CapabilitySection {...props} />
 }
 
 /**
@@ -421,8 +403,20 @@ function countText(rows: readonly CapabilityRow[]): string {
   return `${rows.filter((row) => row.enabled).length}/${rows.length}`
 }
 
-/** 分区实现。折叠状态由本组件自己持有（默认展开），调用方不干预。 */
-function CapabilitySection(props: CapabilityListProps): ReactNode {
+/**
+ * 一段可切换能力列表。折叠状态由本组件自己持有（默认展开），调用方不干预。
+ *
+ * **不变量 21（承重）**：这里**没有**按名字自由添加的输入框。用户只能切换清单里**已经存在**
+ * 的名字；添加不存在的名字既没有输入口，也没有对应的写入字段。搜索框只做**过滤**，不产生新条目。
+ *
+ * 版式：分区头（标题 + 计数 + 折叠箭头）→ 两列卡片网格。搜索框在面板顶部统一渲染，
+ * 本组件只接收 `externalQuery` 做过滤，因此「技能」与「MCP」被同一个词同时过滤。
+ *
+ * **来源分组（可选）**：当每一行都带 `group` 时，卡片不再平铺，而是按组渲染成若干
+ * 可独立折叠的小节（见 `SkillGroups`）。只要有一行缺 `group`，整段就保持扁平 ——
+ * 这样 MCP 段与工作区弹层的 MCP 段自动不受影响，两个面板共用同一段实现。
+ */
+export function CapabilityList(props: CapabilityListProps): ReactNode {
   const { rows, testIdPrefix } = props
   const [open, setOpen] = useState(true)
 
@@ -586,7 +580,7 @@ function SkillGroups(params: {
  * 两个内层 `span` 都是 `aria-hidden` 的纯装饰——可达名由 `button` 的 `aria-label` 提供，
  * 不能让屏幕阅读器把轨道与滑块也念一遍。改结构的原因见 `styles.module.css` 的 `.switch` 注释。
  */
-export function Switch(props: { checked: boolean; label: string; onChange: (next: boolean) => void }): ReactNode {
+function Switch(props: { checked: boolean; label: string; onChange: (next: boolean) => void }): ReactNode {
   return (
     <button
       type="button"

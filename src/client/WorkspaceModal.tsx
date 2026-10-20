@@ -1,18 +1,17 @@
 import { useCallback, useState, type ReactNode } from 'react'
 import { ApiError, post, ROUTES } from './api.ts'
+import { CapabilityPanelBody, ViewBar } from './CapabilityPanel.tsx'
+import { createDefaultTranslate } from './locales.ts'
 import {
-  ViewBar,
   WORKSPACE_VIEW_ORDER,
-  WiredCapabilityBody,
-  createDefaultTranslate,
+  isEnabled,
   toMcpRows,
   toSkillRows,
-  usePolicyPanel,
   type Domain,
-  type Translate,
-} from './CapabilityPanel.tsx'
-import type { WorkspaceValue } from './GlobalPanel.tsx'
+} from './panel-model.ts'
+import { usePolicyPanel } from './panel-state.ts'
 import { CloseIcon, CloverIcon } from './parts.tsx'
+import type { Translate, UseSessionLike, WorkspaceValue } from './types.ts'
 import styles from './styles.module.css'
 
 /**
@@ -27,31 +26,20 @@ import styles from './styles.module.css'
  *
  * 本文件是**外壳**：行派生、开关接线、视图条、列表主体都在 `CapabilityPanel.tsx`，
  * 与全局面板共用。这里只剩工作区弹层独有的部分——`overlay`+`modal` 外壳、关闭按钮、
- * 实时性提示、顶部说明段（末尾带「被全局关闭」计数），以及保存响应「只合并 revision 与 policy」。
+ * 实时性提示、顶部说明段，以及保存响应「只合并 `revision` 与 `workspace`」
+ * （响应里的 `exists` 是写文件之前采集的旧值，不能整体替换视图）。
  */
 
 /**
- * 工作区返回体。**与宿主同名同形**，不再追加任何「UI 辅助字段」。
+ * 三态取值：本层表里有这个键就听表，没有就跟随全局 —— 与服务端 `openResolver`
+ * （`src/policy/evaluate.ts`）同一公式。
  *
- * 曾经的 `disabledGlobally` 与 `inherited` 都已从线上形状中删除：三态语义下没有
- * 「被全局摘掉」这回事——全局关闭的项照样列出来，用户可以在本工程把它打开。
+ * 「全局层关掉的是什么」由共享内核的 `isEnabled` 判定（名单里列的就是被关掉的）。
+ * 客户端那份实现不能改成 import 宿主代码：客户端产物与宿主是两份构建，跨端 import
+ * 会把服务端模块拖进浏览器包。
  */
-export type WorkspaceRouteValue = WorkspaceValue
-
-/**
- * 全局层的开关取值：名单里列的就是被关掉的。
- *
- * 与 `src/policy/evaluate.ts` 的 `openResolver` 同一规则。这里必须**自己再写一遍**
- * 而不是 import 宿主代码：客户端产物与宿主是两份构建，跨端 import 会把服务端模块
- * 拖进浏览器包。
- */
-function globalOpen(names: readonly string[], name: string): boolean {
-  return !names.includes(name)
-}
-
-/** 三态取值：本层表里有这个键就听表，没有就跟随全局。 */
-function isOpen(value: WorkspaceRouteValue, which: Domain, name: string): boolean {
-  return value.workspace[which][name] ?? globalOpen(value.global[which], name)
+function isOpen(value: WorkspaceValue, which: Domain, name: string): boolean {
+  return value.workspace[which][name] ?? isEnabled(value.global[which], name)
 }
 
 /**
@@ -61,9 +49,9 @@ function isOpen(value: WorkspaceRouteValue, which: Domain, name: string): boolea
  * 表里有键且与全局同向 ⇒ 也不是差异（保存时这种条目会被服务端剔除，属于历史残留）；
  * 表里有键且与全局反向 ⇒ 是差异 ⇒ 标红。
  */
-function isOverridden(value: WorkspaceRouteValue, which: Domain, name: string): boolean {
+function isOverridden(value: WorkspaceValue, which: Domain, name: string): boolean {
   const local = value.workspace[which][name]
-  return local !== undefined && local !== globalOpen(value.global[which], name)
+  return local !== undefined && local !== isEnabled(value.global[which], name)
 }
 
 export interface WorkspaceModalProps {
@@ -80,8 +68,8 @@ function projectNameOf(cwd: string): string {
 }
 
 /** 读工作区路由。**只传 sessionId**（不变量 5：scope 由服务端给）。 */
-async function loadWorkspace(sessionId: string): Promise<WorkspaceRouteValue> {
-  const value = await post<WorkspaceRouteValue>(ROUTES.workspace, { sessionId })
+async function loadWorkspace(sessionId: string): Promise<WorkspaceValue> {
+  const value = await post<WorkspaceValue>(ROUTES.workspace, { sessionId })
   if (value === null || typeof value !== 'object' || value.inventory === null || typeof value.inventory !== 'object') {
     throw new ApiError('network', '工作区视图形状非法')
   }
@@ -110,8 +98,8 @@ export function WorkspaceModal(props: WorkspaceModalProps): ReactNode {
    * 比如排序、去重、上限截断）。其余视图字段保留读取时的那一份。
    */
   const save = useCallback(
-    async (current: WorkspaceRouteValue, next: WorkspaceRouteValue): Promise<WorkspaceRouteValue> =>
-      post<WorkspaceRouteValue>(ROUTES.workspaceSave, {
+    async (current: WorkspaceValue, next: WorkspaceValue): Promise<WorkspaceValue> =>
+      post<WorkspaceValue>(ROUTES.workspaceSave, {
         sessionId,
         workspace: next.workspace,
         revision: current.revision,
@@ -127,8 +115,8 @@ export function WorkspaceModal(props: WorkspaceModalProps): ReactNode {
    * 还留着一条将被服务端静默剔除的条目」这种短暂分叉。
    */
   const toggle = useCallback(
-    (current: WorkspaceRouteValue, which: Domain, name: string, open: boolean): WorkspaceRouteValue | null => {
-      const base = globalOpen(current.global[which], name)
+    (current: WorkspaceValue, which: Domain, name: string, open: boolean): WorkspaceValue | null => {
+      const base = isEnabled(current.global[which], name)
       const next: Record<string, boolean> = { ...current.workspace[which] }
       if (open === base) delete next[name]
       else next[name] = open
@@ -138,7 +126,7 @@ export function WorkspaceModal(props: WorkspaceModalProps): ReactNode {
   )
 
   const mergeSaved = useCallback(
-    (previous: WorkspaceRouteValue, saved: WorkspaceRouteValue): WorkspaceRouteValue => ({
+    (previous: WorkspaceValue, saved: WorkspaceValue): WorkspaceValue => ({
       ...previous,
       revision: saved.revision,
       ...(saved.workspace === undefined ? {} : { workspace: saved.workspace }),
@@ -146,9 +134,9 @@ export function WorkspaceModal(props: WorkspaceModalProps): ReactNode {
     [],
   )
 
-  const load = useCallback(async (): Promise<WorkspaceRouteValue> => loadWorkspace(sessionId), [sessionId])
+  const load = useCallback(async (): Promise<WorkspaceValue> => loadWorkspace(sessionId), [sessionId])
 
-  const panel = usePolicyPanel<WorkspaceRouteValue>({ load, save, toggle, mergeSaved })
+  const panel = usePolicyPanel<WorkspaceValue>({ load, save, toggle, mergeSaved })
 
   const refresh = (): void => {
     void panel.refresh()
@@ -200,7 +188,7 @@ export function WorkspaceModal(props: WorkspaceModalProps): ReactNode {
       <div className={styles.modal}>
         <div className={styles.panelHead}>
           <div className={styles.header}>
-            <h2 className={styles.title}>{t('workspace.title').replace('{project}', project)}</h2>
+            <h2 className={styles.title}>{t('workspace.title', { project })}</h2>
             <button
               type="button"
               className={styles.closeButton}
@@ -248,7 +236,7 @@ export function WorkspaceModal(props: WorkspaceModalProps): ReactNode {
 
         <div className={styles.panelBody}>
           <div className={styles.body}>
-            <WiredCapabilityBody
+            <CapabilityPanelBody
               t={t}
               panel={panel}
               skills={skillRows}
@@ -275,7 +263,7 @@ export function WorkspaceModal(props: WorkspaceModalProps): ReactNode {
 export interface WorkspaceChipProps {
   sessionId?: string
   /** 会话订阅钩子；由 `conversation.input.right` 槽位的标准 props 提供。 */
-  useSession?: (selector: (state: { blank: boolean }) => boolean) => boolean
+  useSession?: UseSessionLike
   t?: Translate
   /** 是否有可用会话。没有会话时 chip 不渲染（它不是全局面板的一部分）。 */
   hasSession: boolean

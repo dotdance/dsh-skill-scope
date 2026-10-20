@@ -35,8 +35,8 @@ const workspaceValue = {
   global: { mode: 'blacklist' as const, skills: [], mcps: ['gbrain'] },
   workspace: { skills: { 'md-word-count': false }, mcps: {} },
   revision: 'r1',
-  cwd: '/Users/go/proj/demo',
-  policyPath: '/Users/go/proj/demo/.dsh-scope.json',
+  cwd: '/home/user/proj/demo',
+  policyPath: '/home/user/proj/demo/.dsh-scope.json',
   exists: true,
   live: true,
   inventory: {
@@ -47,9 +47,9 @@ const workspaceValue = {
         source: 'custom',
         provider: 'filesystem',
         modelInvocable: true,
-        group: '/Users/go/node_modules/gbrain/skills',
+        group: '/home/user/node_modules/gbrain/skills',
         groupLabel: 'gbrain',
-        sourceLabel: '/Users/go/node_modules/gbrain/skills',
+        sourceLabel: '/home/user/node_modules/gbrain/skills',
       },
       {
         name: 'academic-verify',
@@ -57,9 +57,9 @@ const workspaceValue = {
         source: 'custom',
         provider: 'filesystem',
         modelInvocable: true,
-        group: '/Users/go/node_modules/gbrain/skills',
+        group: '/home/user/node_modules/gbrain/skills',
         groupLabel: 'gbrain',
-        sourceLabel: '/Users/go/node_modules/gbrain/skills',
+        sourceLabel: '/home/user/node_modules/gbrain/skills',
       },
     ],
     mcps: [
@@ -421,7 +421,7 @@ describe('WorkspaceModal · 卡片版式（目标效果对齐）', () => {
     expect(within(card).getByText('状态')).toBeTruthy()
     expect(within(card).getByText('来源')).toBeTruthy()
     // 「来源」的值是**真实出处**（磁盘注册根绝对路径），不是服务端的 `custom`。
-    expect(within(card).getByText('/Users/go/node_modules/gbrain/skills')).toBeTruthy()
+    expect(within(card).getByText('/home/user/node_modules/gbrain/skills')).toBeTruthy()
   })
 
   it('writes the plugin name as the source for a plugin-provided skill', async () => {
@@ -444,7 +444,7 @@ describe('WorkspaceModal · 卡片版式（目标效果对齐）', () => {
                 source: 'custom',
                 provider: 'superpowers-dsh',
                 modelInvocable: true,
-                group: '/Users/go/.dsh/profiles/debug/node_modules/superpowers-dsh/skills',
+                group: '/home/user/.dsh/profiles/debug/node_modules/superpowers-dsh/skills',
                 groupLabel: 'superpowers-dsh',
                 sourceLabel: 'superpowers-dsh',
               },

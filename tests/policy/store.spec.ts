@@ -151,9 +151,9 @@ describe('PolicyStore', () => {
  * 因此这一组必须走真实的 `$DSH_HOME` 解析路径与真实的原子写/文件锁。
  *
  * 实测缺陷原文：
- * `写入策略文件失败：/Users/go/.dsh/skill-scope/global.json：
+ * `写入策略文件失败：/home/user/.dsh/skill-scope/global.json：
  *  Error: ENOENT: no such file or directory, open
- *  '/Users/go/.dsh/skill-scope/global.json.lock.lock'`
+ *  '/home/user/.dsh/skill-scope/global.json.lock.lock'`
  * 两个原因叠加：① 锁不会建父目录；② 锁名被多拼了一次 `.lock`。
  *
  * **重定向手法**：不往 `PolicyStore` 注入路径（`StoreDeps` 里没有这个字段，
@@ -198,7 +198,7 @@ describe('真实文件系统：全局策略目录不存在时也能写入（回�
 describe('工作区策略', () => {
   // 工作区用例必须用**真实存在**的 cwd：`saveWorkspace` 内部会调
   // `ensureParentDir`（真实 `mkdir`，不走注入的 fs 替身），把 cwd 写成
-  // `/Users/go/proj/demo` 这类固定路径时，只有在作者本机恰好存在才通过，
+  // `/home/user/proj/demo` 这类固定路径时，只有在作者本机恰好存在才通过，
   // 换到 CI 的干净 runner 就 `EACCES`。用 `mkdtemp` 造一次性目录，
   // 平台无关且彼此隔离。
   let cwd: string

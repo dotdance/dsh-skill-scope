@@ -1,7 +1,7 @@
 # 验收报告（实施计划 Task 17）
 
 - 包：`dsh-skill-scope`
-- 仓库：`/Users/go/proj/dsh-skill-scope`
+- 仓库：本仓库（相对路径 `.`）
 - 结论：`pnpm run check` 退出码 `0`，18 个测试文件 / **228** 条测试全绿。
 
 > **本文件的计数会过时。** 它们只在写下时的那个提交上成立。要当前值就自己跑一遍，
@@ -249,7 +249,7 @@ require("react/jsx-runtime")
    注入目录为 `count 1 ['browser-skill']`，当时策略几乎全关，唯独它存活。
    **证据②（复验判据能识别它）**：按 `invocation.modelInvocable !== false` 复验时，
    该 Skill 读回仍是 `{"modelInvocable":true,"userInvocable":true}`（probe1 / 3101，
-   cwd=`/Users/go/proj/chat`），而同一批里其余项都已是 `false`。
+   cwd=`~/proj/chat`），而同一批里其余项都已是 `false`。
 
    **不做每轮先撕后贴**：每轮在 `agent/pre-step` 重建，代价是 `revision += 2N` 且
    `collectCache.clear()` —— **与 prompt cache 直接冲突**，而证据①表明它**并未真正解决**
@@ -268,4 +268,4 @@ require("react/jsx-runtime")
 ---
 
 *本文件由验收任务（Task 17）依据真实命令输出编写。所有命令均在
-`/Users/go/proj/dsh-skill-scope` 下执行，输出逐字复制。*
+本仓库根目录下执行，输出逐字复制。*

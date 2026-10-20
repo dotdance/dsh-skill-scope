@@ -157,7 +157,7 @@ function toRow(raw: {
  *    （同文件 `const SOURCE = 'custom'`），所以只看 `source` 根本分不出插件。
  *
  * 2. **磁盘路径**：provider 是 `filesystem` 时，写 skill 所在**注册根目录的绝对路径**
- *    （`/Users/go/node_modules/gbrain/skills`），而不是每个 skill 各自的目录。
+ *    （`~/node_modules/gbrain/skills`），而不是每个 skill 各自的目录。
  *    用注册根是因为一个根下的几十个 skill 应当显示同一个来源，逐条写各自的
  *    `.../skills/academic-verify` 会让「来源」变成「路径列表」，反而看不出出处。
  *

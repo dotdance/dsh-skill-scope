@@ -24,7 +24,7 @@ import { registerRoutes, type FetchRegisterFace, type FetchRouteSpec } from '../
  *
  * `handleWorkspaceSave` → `store.saveWorkspace` → `ensureParentDir`（`src/policy/store.ts:66`）
  * 会走**真实 `mkdir`**，它不受本文件注入的 `fs` 替身控制。因此凡是「保存成功」的用例，
- * cwd 必须是磁盘上真实可写的目录：写死 `/Users/go/proj/demo` 只在作者本机恰好存在时通过，
+ * cwd 必须是磁盘上真实可写的目录：写死 `/home/user/proj/demo` 只在作者本机恰好存在时通过，
  * 换到 CI 的干净 runner 就 `EACCES`（实测 Linux 上 `/Users` 需 root 才能创建）。
  *
  * 用 `mkdtemp` 造一次性目录：平台无关、可写、用例之间彼此隔离。
@@ -615,7 +615,7 @@ describe('registerRoutes', () => {
    * 「滤掉 `modelInvocable === false`」在实践中造成了真实缺陷 —— 本插件遮蔽一个 skill
    * 的手段就是给它注册 `modelInvocable:false` 的副本，于是**用户每关闭一项，
    * 这一项就被自己创建的过滤器吃掉**，从面板上消失且再也打不开
-   * （实测 `/Users/go/proj/chat`：黑名单 56 项，面板只剩 2 项）。
+   * （实测 `/home/user/proj/chat`：黑名单 56 项，面板只剩 2 项）。
    *
    * 现在两条路由都只做「全局未关闭 ∩（可见 ∪ 本工作区已关闭）」，不看 `modelInvocable`。
    */
@@ -712,7 +712,7 @@ describe('registerRoutes', () => {
   /**
    * 回归防护（用户实测缺陷，2026-10-13）：**本工作区已关闭的项必须在面板上可见**。
    *
-   * 缺陷形态：`/Users/go/proj/chat` 的工作区黑名单有 56 项，面板只列出 2 项
+   * 缺陷形态：`/home/user/proj/chat` 的工作区黑名单有 56 项，面板只列出 2 项
    * （brainstorming、lark-doc）。用户的原话是「我的开关怎么都消失了」——
    * 他关掉的项从面板上消失，于是既看不到、也**无法再打开**。
    *

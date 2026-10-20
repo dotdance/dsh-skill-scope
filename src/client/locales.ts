@@ -1,11 +1,29 @@
 /**
- * 面板共用的词条与值类型。
+ * 面板共用的词条与占位符替换。
  *
  * 两个面板共用 `NS` 与这里的字典：各写一份会让「同一句话两处不同」成为必然。
+ * 类型定义在 `types.ts`（那个模块不引入任何运行时代码）。
  */
+
+import type { Translate } from './types.ts'
 
 /** locale 命名空间。与 `apply` 里 `ctx.locale.register(NS, ...)` 一致。 */
 export const NS = 'skill-scope'
+
+/**
+ * 把 `{key}` 占位符替换成 `params` 里的值；`params` 缺失时原样返回。
+ *
+ * 宿主 i18n 的 `t` 与本文件的兜底词条都过这一层：替换规则只该有一份实现，
+ * 否则「宿主有 i18n」与「没有 i18n」两种路径下的文案可能不一致。
+ * 未在 `params` 里出现的占位符保持原样（缺参时报出可见的 `{key}` 比静默吞掉更好排查）。
+ */
+export function withParams(template: string, params?: Record<string, string>): string {
+  if (params === undefined) return template
+  return Object.entries(params).reduce(
+    (text, [key, value]) => text.replaceAll(`{${key}}`, value),
+    template,
+  )
+}
 
 /** 中文词条（权威文案；英文是它的对照翻译）。 */
 export const zh = {
@@ -47,16 +65,6 @@ export const zh = {
   // 这句文案是与用户确认过的措辞，不要按「已有会话的下一回合也会生效」之类的推论去改它 ——
   // 该推论未经实测，且与用户明确要求冲突。
   'workspace.intro': '初始默认继承全局配置；你可以覆盖修改 skill 开关状态，改动只对本 workspace 新开的会话生效。',
-  // 弹层顶部那段说明末尾追加的计数。数的是 **skill + MCP 合计**被全局关掉了几项：
-  // 用户关心的是「被全局挡在门外的一共有多少」，而不是它归哪一段管 —— 分开两处报数
-  // 会让同一件事在两个地方各说一半。
-  //
-  // 服务端的 `disabledGlobally` 是 skill 名 + MCP server 名的并集，两份名单本身
-  // 就已去重（名单里不会出现同名项），所以 `length` 直接可用，不需要再并一次。
-  //
-  // 2026-10-14：这句原先是列表下方**独立的一行**（`另有 {n} 项被全局关闭，不在此列出。`），
-  // 按用户要求改为**并入顶部文案**。现在它是说明段里的一个独立文本节点，
-  // 前缀一个空格与前面的句子相接；不带句号，接在长句后面读起来才不截断。
 } as const
 
 /** 英文词条。键必须与 `zh` 完全一致（少一条就是一段只显示 key 的界面）。 */
@@ -92,4 +100,16 @@ export const en: Record<keyof typeof zh, string> = {
   'count.unit': 'items',
   'group.ungrouped': 'Runtime-injected',
   'workspace.intro': 'By default everything inherits the global configuration; you can override any skill switch here. Changes apply only to new sessions in this workspace.',
+}
+
+/**
+ * 无宿主 i18n 时的兜底词条。
+ *
+ * 宿主 i18n 的取值器（`index.tsx` 的 `t`）与本函数都过 `withParams`：替换规则只有
+ * 一份实现，所以「有宿主 i18n」与「没有 i18n」两条路径的文案行为必然一致。
+ * 定义在 `zh` / `en` 之后：调用时才读字典，但顺序保持「字典在先」更容易读。
+ */
+export function createDefaultTranslate(): Translate {
+  const dictionary: Record<string, string> = zh
+  return (key, params) => withParams(dictionary[key] ?? key, params)
 }

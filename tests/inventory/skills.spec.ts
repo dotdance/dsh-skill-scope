@@ -57,16 +57,16 @@ describe('readAgentSkills', () => {
   it('passes cwd and the live agent as scope', async () => {
     const agent = { id: 's1' }
     const fake = fakeSkills({ rows: [] })
-    await readAgentSkills(fake, agent, '/Users/go/proj/demo')
+    await readAgentSkills(fake, agent, '/home/user/proj/demo')
     // scope 必须是活 agent 对象本身（不是 id 字符串、不是副本），dsh-skill 只认显式传入的 scope。
-    expect(fake.calls).toEqual([{ cwd: '/Users/go/proj/demo', scope: agent }])
+    expect(fake.calls).toEqual([{ cwd: '/home/user/proj/demo', scope: agent }])
   })
 })
 
 describe('official infrastructure skills are hidden', () => {
   /** 官方 preset skill 的真实路径（见 `tests/inventory/official.spec.ts` 的说明）。 */
-  const OFFICIAL = '/Users/go/node_modules/@deepseek-ai/dsh-agent-preset/skills/agent-experience/SKILL.md'
-  const OWN = '/Users/go/proj/sand/skills/academic-verify/SKILL.md'
+  const OFFICIAL = '/home/user/node_modules/@deepseek-ai/dsh-agent-preset/skills/agent-experience/SKILL.md'
+  const OWN = '/home/user/proj/sand/skills/academic-verify/SKILL.md'
 
   it('drops official preset skills from the global inventory', async () => {
     const fake = fakeSkills({
@@ -167,12 +167,12 @@ describe('row mapping', () => {
   it('carries path through when present and omits the key entirely when absent', async () => {
     const fake = fakeSkills({
       rows: [
-        { name: 'with-path', path: '/Users/go/.agents/skills/with-path' },
+        { name: 'with-path', path: '/home/user/.agents/skills/with-path' },
         { name: 'no-path' },
       ],
     })
     const inventory = await readGlobalSkills(fake)
-    expect(inventory.rows[0]?.path).toBe('/Users/go/.agents/skills/with-path')
+    expect(inventory.rows[0]?.path).toBe('/home/user/.agents/skills/with-path')
     // **不能补 `''`**：`''` 与「没有 path」是两种不同事实，补空串会让分组无法区分
     // 「runtime 注入」与「路径恰好为空」。
     expect(Object.hasOwn(inventory.rows[1] ?? {}, 'path')).toBe(false)
@@ -182,10 +182,10 @@ describe('row mapping', () => {
 describe('groupKeyOf', () => {
   it('walks up to the nearest `skills` directory (the registration root)', () => {
     // 实测数据里的真实形态：path 的粒度是技能目录本身，直接按它分组会得到 138 组每组 1 个。
-    expect(groupKeyOf(row({ name: 'gbrain-status', path: '/Users/go/node_modules/gbrain/skills/gbrain-status' }))).toBe(
-      '/Users/go/node_modules/gbrain/skills',
+    expect(groupKeyOf(row({ name: 'gbrain-status', path: '/home/user/node_modules/gbrain/skills/gbrain-status' }))).toBe(
+      '/home/user/node_modules/gbrain/skills',
     )
-    expect(groupKeyOf(row({ name: 'why', path: '/Users/go/.agents/skills/why' }))).toBe('/Users/go/.agents/skills')
+    expect(groupKeyOf(row({ name: 'why', path: '/home/user/.agents/skills/why' }))).toBe('/home/user/.agents/skills')
   })
 
   it('picks the innermost `skills` when the path contains more than one', () => {
@@ -214,28 +214,28 @@ describe('groupLabelOf', () => {
     // 用户要的「插件名」：从 `<...>/node_modules/<包名>/skills` 取包名，
     // 而不是渲染一整串绝对路径（实测命中 superpowers-dsh）。
     expect(
-      groupLabelOf('/Users/go/.dsh/profiles/debug/node_modules/superpowers-dsh/skills'),
+      groupLabelOf('/home/user/.dsh/profiles/debug/node_modules/superpowers-dsh/skills'),
     ).toBe('superpowers-dsh')
   })
 
   it('names a folder group after its basename', () => {
-    expect(groupLabelOf('/Users/go/node_modules/gbrain/skills')).toBe('gbrain')
-    expect(groupLabelOf('/Users/go/proj/sand/skills')).toBe('sand')
+    expect(groupLabelOf('/home/user/node_modules/gbrain/skills')).toBe('gbrain')
+    expect(groupLabelOf('/home/user/proj/sand/skills')).toBe('sand')
   })
 
   it('steps up one level when the basename is `skills` itself', () => {
     // **回归守卫**：实测 6 组里有 3 组的 basename 都是 `skills`。不退这一级就会得到
     // 三个一模一样的组名（都叫 `skills`），用户完全无法区分——与分组目标直接相反。
-    expect(groupLabelOf('/Users/go/.agents/skills')).toBe('.agents')
-    expect(groupLabelOf('/Users/go/Library/Application Support/Tabbit/LocalAgent/skills')).toBe('LocalAgent')
+    expect(groupLabelOf('/home/user/.agents/skills')).toBe('.agents')
+    expect(groupLabelOf('/home/user/Library/Application Support/Tabbit/LocalAgent/skills')).toBe('LocalAgent')
   })
 
   it('distinguishes the folder groups that share the `skills` basename', () => {
     // 三条真实路径必须给出三个**互不相同**的标签。
     const labels = [
-      '/Users/go/.agents/skills',
-      '/Users/go/proj/sand/skills',
-      '/Users/go/Library/Application Support/Tabbit/LocalAgent/skills',
+      '/home/user/.agents/skills',
+      '/home/user/proj/sand/skills',
+      '/home/user/Library/Application Support/Tabbit/LocalAgent/skills',
     ].map((key) => groupLabelOf(key))
     expect(new Set(labels).size).toBe(3)
   })
@@ -266,7 +266,7 @@ describe('sourceLabelOf', () => {
           name: 'brainstorming',
           source: 'custom',
           provider: 'superpowers-dsh',
-          path: '/Users/go/.dsh/profiles/debug/node_modules/superpowers-dsh/skills/brainstorming/SKILL.md',
+          path: '/home/user/.dsh/profiles/debug/node_modules/superpowers-dsh/skills/brainstorming/SKILL.md',
         }),
       ),
     ).toBe('superpowers-dsh')
@@ -281,20 +281,20 @@ describe('sourceLabelOf', () => {
      */
     expect(
       sourceLabelOf(
-        row({ name: 'academic-verify', provider: 'filesystem', path: '/Users/go/node_modules/gbrain/skills/academic-verify' }),
+        row({ name: 'academic-verify', provider: 'filesystem', path: '/home/user/node_modules/gbrain/skills/academic-verify' }),
       ),
-    ).toBe('/Users/go/node_modules/gbrain/skills')
+    ).toBe('/home/user/node_modules/gbrain/skills')
   })
 
   it('gives every skill under one filesystem root the same source label', () => {
     // 同源断言：三个不同 skill 目录必须归到同一个来源字符串，否则「来源」会变成路径清单。
     const labels = [
-      '/Users/go/node_modules/gbrain/skills/academic-verify',
-      '/Users/go/node_modules/gbrain/skills/briefing',
-      '/Users/go/node_modules/gbrain/skills/capture',
+      '/home/user/node_modules/gbrain/skills/academic-verify',
+      '/home/user/node_modules/gbrain/skills/briefing',
+      '/home/user/node_modules/gbrain/skills/capture',
     ].map((path) => sourceLabelOf(row({ name: 'x', provider: 'filesystem', path })))
     expect(new Set(labels).size).toBe(1)
-    expect(labels[0]).toBe('/Users/go/node_modules/gbrain/skills')
+    expect(labels[0]).toBe('/home/user/node_modules/gbrain/skills')
   })
 
   it('returns null for runtime-injected skills so the client can localize', () => {
@@ -311,8 +311,8 @@ describe('sourceLabelOf', () => {
      * 之外的东西而漏掉路径」。
      */
     expect(
-      sourceLabelOf(row({ name: 'a', provider: 'unknown', path: '/Users/go/proj/sand/skills/foo' })),
-    ).toBe('/Users/go/proj/sand/skills')
+      sourceLabelOf(row({ name: 'a', provider: 'unknown', path: '/home/user/proj/sand/skills/foo' })),
+    ).toBe('/home/user/proj/sand/skills')
   })
 
   it('returns null when neither a provider identity nor a path is available', () => {

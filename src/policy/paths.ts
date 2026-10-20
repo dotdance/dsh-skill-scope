@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { dshHomePath, resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 
 /**
  * 工程目录下的策略文件名。
@@ -7,7 +7,7 @@ import { dshHomePath, resolveDshHome } from '@deepseek-ai/dsh-home-paths'
  * 保留 `.dsh-scope.json`：本机多个老工程（最早 2026-09-11，早于本插件）已存在
  * 同名文件，沿用旧名可零迁移，也不会让新旧文件同时出现在同一工程里造成歧义。
  */
-export const WORKSPACE_POLICY_FILE = '.dsh-scope.json'
+const WORKSPACE_POLICY_FILE = '.dsh-scope.json'
 
 /** `$DSH_HOME/skill-scope/global.json`。取不到 home 时退回 `resolveDshHome()` 的等价路径。 */
 export function globalPolicyPath(): string {
@@ -32,9 +32,4 @@ export function workspacePolicyPath(cwd: string): string {
  */
 export function policyLockPath(path: string): string {
   return `${path}.lock`
-}
-
-/** 供测试与诊断使用：当前解析出的 `$DSH_HOME`。 */
-export function dshHomeDir(): string {
-  return resolveDshHome()
 }

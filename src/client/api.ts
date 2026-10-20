@@ -11,6 +11,7 @@
  * 也就是说，「打不到路由」不会变成白屏，而是变成一条用户可读的失败提示。
  */
 
+import { API_PATH } from '../shared/routes.ts'
 import { asRecord } from '../shared/unknown.ts'
 
 /** 与宿主 `ErrorCode` 对齐的前端错误码；`network` 是前端**自己**产生的（网络/中止/非 JSON）。 */
@@ -30,17 +31,8 @@ export class ApiError extends Error {
 /** 宿主信封（设计 6.2）。与 `src/routes/handlers.ts` 的 `Envelope` 同形。 */
 type Envelope<T> = { ok: true; value: T } | { ok: false; error: { code: string; message: string } }
 
-/**
- * 四条路由。**不含前导斜杠**（`post` 会补上）；这样字符串本身就是设计 6.2 里写的那个值，
- * 与 `src/routes/register.ts` 的 `ROUTES`（含 `/api` 前缀的完整 pathname）在语义上区分开：
- * 那边的值是「宿主注册用的完整 pathname」，这边是「客户端要拼的路径片段」。
- */
-export const ROUTES = {
-  global: 'api/skill-scope/global',
-  globalSave: 'api/skill-scope/global/save',
-  workspace: 'api/skill-scope/workspace',
-  workspaceSave: 'api/skill-scope/workspace/save',
-} as const
+/** 四条路由：路径段的唯一来源是 `src/shared/routes.ts`，`post` 会补前导斜杠。 */
+export const ROUTES = API_PATH
 
 /** 默认超时。面板是交互入口，10 秒足够；超时必须兜底，不能让用户对着转圈等。 */
 const DEFAULT_TIMEOUT_MS = 10000

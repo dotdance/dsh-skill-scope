@@ -1,8 +1,9 @@
 import { useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
 import { GlobalPanel } from './GlobalPanel.tsx'
-import { en, NS, zh } from './locales.ts'
+import { en, NS, withParams, zh } from './locales.ts'
 import { CloverIcon } from './parts.tsx'
+import type { Translate, UseSessionLike } from './types.ts'
 import { WorkspaceChip, WorkspaceModal } from './WorkspaceModal.tsx'
 
 /**
@@ -38,9 +39,6 @@ import { WorkspaceChip, WorkspaceModal } from './WorkspaceModal.tsx'
  * 好处有两个：编译期不依赖宿主包；单测可以用纯对象替身（见 `tests/support/fake-client-ctx.ts`）。
  */
 
-/** `locale.bind(NS)` 的返回形状：取词条，支持 `{name}` 形式的占位符替换。 */
-export type TranslateFn = (key: string, params?: Record<string, string>) => string
-
 /** 槽位注册选项的最小结构面（官方 `BaseOptions` + list/keyed 的 `KindOptions`）。 */
 export interface SlotRegisterOptions {
   name: string
@@ -69,16 +67,13 @@ export interface LayoutFace {
 /** `locale` 面。`register` 返回 disposer；`bind` 给出取值器。 */
 export interface LocaleFace {
   register(namespace: string, dictionaries: Record<string, Record<string, string>>): () => void
-  bind(namespace: string): TranslateFn
+  bind(namespace: string): Translate
 }
 
 /** `effect` 面：注册一个随插件卸载一起释放的副作用。 */
 export interface EffectFace {
   effect(callback: () => unknown, label?: string): () => void
 }
-
-/** `conversation.input.right` 槽位的标准 props 之一：按选择器订阅会话状态。 */
-export type UseSessionLike = (selector: (state: { blank: boolean }) => boolean) => boolean
 
 /**
  * 本插件需要的最小客户端 Context 面。**导出**它，因为测试要按它造替身，
@@ -115,12 +110,6 @@ export const PANEL_ID = 'skill-scope'
 export const WORKSPACE_CHIP_ID = 'skill-scope-workspace'
 export const WORKSPACE_MODAL_ID = 'skill-scope-workspace-modal'
 
-/** 从 locale 服务取一个 `{name}` 占位符替换器；缺参数时保留原样（不塞 `undefined`）。 */
-function withParams(template: string, params?: Record<string, string>): string {
-  if (params === undefined) return template
-  return Object.entries(params).reduce((text, [key, value]) => text.replaceAll(`{${key}}`, value), template)
-}
-
 /**
  * 装配客户端插件：注册词条与三个槽位，返回 `undefined`。
  *
@@ -130,7 +119,7 @@ function withParams(template: string, params?: Record<string, string>): string {
 export function apply(ctx: ClientContextLike): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), `${NS}: dictionaries`)
   const bind = ctx.locale.bind(NS)
-  const t: TranslateFn = (key, params) => withParams(bind(key), params)
+  const t: Translate = (key, params) => withParams(bind(key), params)
 
   // --- 全局面板：侧栏可达 + main 面板 ---
   // `sidebar.panellist` 的 id 必须与 `main` 的 key 一致：sidebar 用这个 id 找面板并解析标签。
