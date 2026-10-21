@@ -1,3 +1,7 @@
 - insert:
     - id: dsh-skill-scope
       name: "@dotdance/dsh-skill-scope"
+
+- id: skill-filesystem
+  name: "@deepseek-ai/dsh-skill-filesystem"
+  disabled: false
