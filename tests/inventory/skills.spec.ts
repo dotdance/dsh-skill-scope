@@ -47,7 +47,7 @@ function fakeSkills(options: {
 describe('readGlobalSkills', () => {
   it('reads the global layer with an empty options object', async () => {
     const fake = fakeSkills({ rows: [{ name: 'a' }] })
-    await readGlobalSkills(fake)
+    await readGlobalSkills(fake, { showOfficialSkills: false })
     // 必须是空对象：带 cwd 会把全局读变成工作区读，带 scope 会误取某一 agent 的层。
     expect(fake.calls).toEqual([{}])
   })
@@ -57,13 +57,13 @@ describe('readAgentSkills', () => {
   it('passes cwd and the live agent as scope', async () => {
     const agent = { id: 's1' }
     const fake = fakeSkills({ rows: [] })
-    await readAgentSkills(fake, agent, '/home/user/proj/demo')
+    await readAgentSkills(fake, agent, '/home/user/proj/demo', { showOfficialSkills: false })
     // scope 必须是活 agent 对象本身（不是 id 字符串、不是副本），dsh-skill 只认显式传入的 scope。
     expect(fake.calls).toEqual([{ cwd: '/home/user/proj/demo', scope: agent }])
   })
 })
 
-describe('official infrastructure skills are hidden', () => {
+describe('official infrastructure skills are hidden by default', () => {
   /** 官方 preset skill 的真实路径（见 `tests/inventory/official.spec.ts` 的说明）。 */
   const OFFICIAL = '/home/user/node_modules/@deepseek-ai/dsh-agent-preset/skills/agent-experience/SKILL.md'
   const OWN = '/home/user/proj/sand/skills/academic-verify/SKILL.md'
@@ -75,7 +75,7 @@ describe('official infrastructure skills are hidden', () => {
         { name: 'academic-verify', path: OWN },
       ],
     })
-    const inventory = await readGlobalSkills(fake)
+    const inventory = await readGlobalSkills(fake, { showOfficialSkills: false })
     expect(inventory.rows.map((r) => r.name)).toEqual(['academic-verify'])
   })
 
@@ -87,15 +87,15 @@ describe('official infrastructure skills are hidden', () => {
         { name: 'academic-verify', path: OWN },
       ],
     })
-    const inventory = await readAgentSkills(fake, { id: 's1' }, '/w')
+    const inventory = await readAgentSkills(fake, { id: 's1' }, '/w', { showOfficialSkills: false })
     expect(inventory.rows.map((r) => r.name)).toEqual(['academic-verify'])
   })
 
-  it('does not filter by provider or source, which the official skills share with local ones', async () => {
+  it('keeps local skills whose `filesystem` provider is shared with the official preset ones', async () => {
     /*
      * **回归守卫**：官方 skill 的 provider 是 `filesystem`、source 是 `custom`，
-     * 与本机 88 条自建 skill 完全相同。若有人日后改成按 provider 过滤，
-     * 这条用例会失败——它钉住「同 provider 的本地 skill 必须保留」。
+     * 与本机 88 条自建 skill 完全相同。若有人日后改成「按 provider 白名单外的
+     * 非 filesystem 即官方」这种粗口径，这条用例会失败——它钉住同 provider 的本地 skill 必须保留。
      */
     const fake = fakeSkills({
       rows: [
@@ -103,28 +103,73 @@ describe('official infrastructure skills are hidden', () => {
         { name: 'academic-verify', source: 'custom', provider: 'filesystem', path: OWN },
       ],
     })
-    const inventory = await readGlobalSkills(fake)
+    const inventory = await readGlobalSkills(fake, { showOfficialSkills: false })
     expect(inventory.rows.map((r) => r.name)).toEqual(['academic-verify'])
     expect(inventory.rows[0]?.provider).toBe('filesystem')
   })
 
+  it('drops a path-less official provider row (`dsh-office`) at the inventory level', async () => {
+    /*
+     * 实测行（2026-10-21）：7 条 `office-*` 全部 `provider:'dsh-office'`、
+     * `source:'bundled'`、**无 `path`**。路径规则对它们无能为力，只有 provider
+     * 白名单能盖住。这条钉住「过滤调用点确实走了 `isOfficialSkill` 而不是只比路径」——
+     * 若有人把 `toRows` 改回 `isOfficialSkillPath(entry.path)`，它就会失败。
+     */
+    const fake = fakeSkills({
+      rows: [
+        { name: 'office-export-pdf', source: 'bundled', provider: 'dsh-office' },
+        { name: 'academic-verify', source: 'custom', provider: 'filesystem', path: OWN },
+        { name: 'browser-skill', source: 'runtime', provider: 'runtime' },
+      ],
+    })
+    const inventory = await readGlobalSkills(fake, { showOfficialSkills: false })
+    // runtime 行必须保留：它是「用户要能单独关掉」的对象，不在官方白名单里。
+    expect(inventory.rows.map((r) => r.name)).toEqual(['academic-verify', 'browser-skill'])
+  })
+
   it('leaves completeness untouched when hiding rows', async () => {
     const fake = fakeSkills({ complete: false, rows: [{ name: 'agent-experience', path: OFFICIAL }] })
-    const inventory = await readGlobalSkills(fake)
+    const inventory = await readGlobalSkills(fake, { showOfficialSkills: false })
     expect(inventory).toEqual({ rows: [], complete: false })
+  })
+})
+
+describe('official infrastructure skills when the display switch is on', () => {
+  const OFFICIAL = '/home/user/node_modules/@deepseek-ai/dsh-agent-preset/skills/agent-experience/SKILL.md'
+  /*
+   * 开关打开时**只改「列不列」，不改任何名字的开/关**：这些行原样回到清单，
+   * 后续的关闭动作由策略层决定（路由/求值不动这里）。
+   */
+  it('keeps official preset skills in the global inventory', async () => {
+    const fake = fakeSkills({
+      rows: [
+        { name: 'agent-experience', path: OFFICIAL },
+        { name: 'academic-verify', path: '/home/user/proj/sand/skills/academic-verify/SKILL.md' },
+      ],
+    })
+    const inventory = await readGlobalSkills(fake, { showOfficialSkills: true })
+    expect(inventory.rows.map((r) => r.name)).toEqual(['agent-experience', 'academic-verify'])
+  })
+
+  it('keeps the path-less official provider rows too (`dsh-office`)', async () => {
+    const fake = fakeSkills({
+      rows: [{ name: 'office-export-pdf', source: 'bundled', provider: 'dsh-office' }],
+    })
+    const inventory = await readAgentSkills(fake, { id: 's1' }, '/w', { showOfficialSkills: true })
+    expect(inventory.rows.map((r) => r.name)).toEqual(['office-export-pdf'])
   })
 })
 
 describe('inventory completeness', () => {
   it('surfaces complete === false instead of pretending the inventory is empty', async () => {
     const fake = fakeSkills({ complete: false, rows: [{ name: 'a' }] })
-    const inventory = await readGlobalSkills(fake)
+    const inventory = await readGlobalSkills(fake, { showOfficialSkills: false })
     expect(inventory.complete).toBe(false)
   })
 
   it('passes complete === true through unchanged', async () => {
     const fake = fakeSkills({ complete: true, rows: [] })
-    const inventory: SkillInventory = await readAgentSkills(fake, { id: 's1' }, '/tmp/w')
+    const inventory: SkillInventory = await readAgentSkills(fake, { id: 's1' }, '/tmp/w', { showOfficialSkills: false })
     expect(inventory).toEqual({ rows: [], complete: true })
   })
 })
@@ -132,7 +177,7 @@ describe('inventory completeness', () => {
 describe('row mapping', () => {
   it('maps absent optional fields to stable defaults', async () => {
     const fake = fakeSkills({ rows: [{ name: 'a' }] })
-    const inventory = await readGlobalSkills(fake)
+    const inventory = await readGlobalSkills(fake, { showOfficialSkills: false })
     // `provider` 缺失 → `'unknown'`，**不能**退成 `'filesystem'`：见 `sourceLabelOf` 的
     // 兜底分支，若在此处冒充成 filesystem，一个判定失败的 skill 会拿到磁盘路径标签。
     expect(inventory.rows).toEqual([
@@ -152,7 +197,7 @@ describe('row mapping', () => {
         },
       ],
     })
-    const inventory = await readGlobalSkills(fake)
+    const inventory = await readGlobalSkills(fake, { showOfficialSkills: false })
     expect(inventory.rows).toEqual([
       {
         name: 'b',
@@ -171,7 +216,7 @@ describe('row mapping', () => {
         { name: 'no-path' },
       ],
     })
-    const inventory = await readGlobalSkills(fake)
+    const inventory = await readGlobalSkills(fake, { showOfficialSkills: false })
     expect(inventory.rows[0]?.path).toBe('/home/user/.agents/skills/with-path')
     // **不能补 `''`**：`''` 与「没有 path」是两种不同事实，补空串会让分组无法区分
     // 「runtime 注入」与「路径恰好为空」。
@@ -200,6 +245,27 @@ describe('groupKeyOf', () => {
 
   it('returns the sentinel for a row without a path', () => {
     expect(groupKeyOf(row({ name: 'browser-skill' }))).toBe(UNGROUPED_KEY)
+  })
+
+  it('groups a path-less row by its plugin provider, not as runtime-injected', async () => {
+    /*
+     * 实测（2026-10-21）：`@deepseek-ai/dsh-skill-office` 注册的 7 条 `office-*`
+     * 只给 `locator`/`resourceBase`，**不给 `path`**（`dsh-skill-office/lib/index.js:61-101`），
+     * 而宿主 `toSummary` 只透出 `path`。旧规则把它们归进「运行时注入」组，
+     * 与它们自己那一行「来源：dsh-office」矛盾。provider 是注册表的强制约束，
+     * 所以这类行按 provider 成组，组名即 provider 名。
+     */
+    expect(groupKeyOf(row({ name: 'office-docx', provider: 'dsh-office' }))).toBe('provider:dsh-office')
+    // 不同插件各有各的组，不会并到一组。
+    expect(groupKeyOf(row({ name: 'x', provider: 'superpowers-dsh' }))).toBe('provider:superpowers-dsh')
+  })
+
+  it('keeps built-in providers in the ungrouped sentinel', () => {
+    // `runtime` 由注册表直接注入、真没有出处；`filesystem` 无 path 属于异常形态，
+    // 两者都不能冒充某个插件的分组。
+    expect(groupKeyOf(row({ name: 'browser-skill', provider: 'runtime' }))).toBe(UNGROUPED_KEY)
+    expect(groupKeyOf(row({ name: 'x', provider: 'filesystem' }))).toBe(UNGROUPED_KEY)
+    expect(groupKeyOf(row({ name: 'y', provider: 'unknown' }))).toBe(UNGROUPED_KEY)
   })
 
   it('does not collide the sentinel with a real path', () => {
@@ -243,6 +309,11 @@ describe('groupLabelOf', () => {
   it('returns an empty label for the ungrouped sentinel', () => {
     // 空串是给前端的信号：换成本地化文案（`group.ungrouped`），而不是渲染哨兵值。
     expect(groupLabelOf(UNGROUPED_KEY)).toBe('')
+  })
+
+  it('names a provider group after the provider itself', () => {
+    // 与行详情里的「来源」逐字一致：用户看到的就是注册它的那个 provider。
+    expect(groupLabelOf('provider:dsh-office')).toBe('dsh-office')
   })
 
   it('is independent of the host path prefix', () => {

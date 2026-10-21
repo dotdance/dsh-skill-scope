@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isOfficialSkillPath } from '../../src/inventory/official.ts'
+import { isOfficialSkill, isOfficialSkillPath } from '../../src/inventory/official.ts'
 
 /**
  * 官方包在磁盘上的真实路径，取自 web profile 上的实测输出（2026-10-14），
@@ -85,5 +85,46 @@ describe('isOfficialSkillPath', () => {
     it('hides a user’s own skill whose project name merely contains the scope string', () => {
       expect(isOfficialSkillPath('/home/user/proj/@deepseek-ai-tools/skills/x/SKILL.md')).toBe(true)
     })
+  })
+})
+
+describe('isOfficialSkill', () => {
+  it('recognizes the real path-less `dsh-office` row (measured 2026-10-21)', () => {
+    /*
+     * 实测的原始行（`POST /api/skill-scope/global`）：
+     * `{ name:'office-export-pdf', provider:'dsh-office', source:'bundled', path: undefined }`。
+     * 路径规则对它返回 false（没有 path 可判），provider 白名单是唯一能盖住它的信号。
+     * 注意判定**不看 source**：`filesystem` provider 的 `DSH_BUNDLED_SKILL_DIR`
+     * 也会把用户目录标成 `bundled`，按 source 判会误伤。
+     */
+    expect(isOfficialSkill({ provider: 'dsh-office' })).toBe(true)
+  })
+
+  it('keeps host runtime skills visible, because the user must be able to switch them off', () => {
+    // `browser-skill` / `memory-recall` 是宿主自注册的 runtime skill，**不是**本次要隐藏的对象。
+    expect(isOfficialSkill({ provider: 'runtime' })).toBe(false)
+    expect(isOfficialSkill({ provider: 'runtime', path: '/g/whatever/SKILL.md' })).toBe(false)
+  })
+
+  it('keeps a third-party plugin provider visible, even without a path', () => {
+    // `superpowers-dsh` 也注册自己的 provider；它的来源标签正是「插件名」，必须仍可开关。
+    expect(isOfficialSkill({ provider: 'superpowers-dsh' })).toBe(false)
+  })
+
+  it('treats an undetermined provider as non-official', () => {
+    // `toRow` 把缺失 provider 收敛成 `'unknown'`；判不出时不能藏。
+    expect(isOfficialSkill({})).toBe(false)
+    expect(isOfficialSkill({ provider: 'unknown' })).toBe(false)
+  })
+
+  it('still hides a filesystem skill whose path lies in the official scope', () => {
+    // 两条信号是或关系：provider 不是白名单成员，但路径规则命中 ⇒ 官方。
+    expect(
+      isOfficialSkill({ provider: 'filesystem', path: '/g/node_modules/@deepseek-ai/dsh-agent-preset/skills/x/SKILL.md' }),
+    ).toBe(true)
+  })
+
+  it('leaves a user’s filesystem skill visible', () => {
+    expect(isOfficialSkill({ provider: 'filesystem', path: '/home/user/proj/sand/skills/mine/SKILL.md' })).toBe(false)
   })
 })

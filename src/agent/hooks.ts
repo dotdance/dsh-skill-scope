@@ -122,7 +122,13 @@ async function computeHidden(
   //   `[NS] standIn=141 raw=141 onlyStandIn=0 onlyRaw=0 same=true`
   // 若哪天改成按 `modelInvocable` 判定，这里就必须像复验那样传 `agent.raw`
   // （对象身份索引，见 `src/agent/skills.ts` 复验段注释）。
-  const inventory = await readAgentSkills(deps.skills, agent, cwd ?? '')
+  //
+  // `showOfficialSkills: true` 是**承重**的，不是"顺手取全量"：掩蔽集是
+  // 「清单 − 允许集」反推出来的，清单里没有的名字永远不会被遮蔽。用户在面板上
+  // 打开过「显示官方 Skill」并关掉某条官方 skill 之后，即使把开关关回去，
+  // 那条决定仍然有效——所以这里必须始终按全量清单求值。面板展示口径的过滤
+  // 只发生在路由层（`src/routes/handlers.ts`）。
+  const inventory = await readAgentSkills(deps.skills, agent, cwd ?? '', { showOfficialSkills: true })
   if (inventory.complete !== true) {
     deps.logger.warn(
       `dsh-skill-scope: skill 清单不完整（incomplete），本轮不改变收窄状态（agent=${agent.id}）`,

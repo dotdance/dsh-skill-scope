@@ -1,6 +1,6 @@
 import { useCallback, useState, type ReactNode } from 'react'
 import { ApiError, post, ROUTES } from './api.ts'
-import { CapabilityPanelBody, ViewBar } from './CapabilityPanel.tsx'
+import { CapabilityPanelBody, OfficialSkillsToggle, ViewBar } from './CapabilityPanel.tsx'
 import { createDefaultTranslate } from './locales.ts'
 import { isEnabled, toMcpRows, toSkillRows, type Domain } from './panel-model.ts'
 import { usePolicyPanel } from './panel-state.ts'
@@ -18,6 +18,7 @@ import styles from './styles.module.css'
  *
  * 本文件是**外壳**：行派生、开关接线、视图条、列表主体都在 `CapabilityPanel.tsx`，
  * 与工作区弹层共用。这里只剩全局面板独有的部分——`styles.panel` 外壳、标题、
+ * **官方 skill 展示开关**（`showOfficialSkills`，存在全局策略里，两个面板同口径），
  * 以及保存响应「整体替换」的线上形状（全局响应就是完整的 `GlobalValue`）。
  */
 
@@ -62,6 +63,8 @@ export function GlobalPanel(props: GlobalPanelProps): ReactNode {
         mode: next.policy.mode,
         skills: next.policy.skills,
         mcps: next.policy.mcps,
+        // 展示开关与名单一起提交：它存在同一个全局策略文件里，服务端按 revision 守卫。
+        showOfficialSkills: next.policy.showOfficialSkills,
         revision: current.revision,
         ...(sessionId === undefined ? {} : { sessionId }),
       }),
@@ -87,6 +90,26 @@ export function GlobalPanel(props: GlobalPanelProps): ReactNode {
   const load = useCallback(async (): Promise<GlobalValue> => loadGlobal(sessionId), [sessionId])
 
   const panel = usePolicyPanel<GlobalValue>({ load, save, toggle })
+
+  /**
+   * 展示开关：只改「官方 skill 列不列」，不改任何名字的开/关。
+   *
+   * 走 `panel.commit`（与名单开关同一条「乐观改 → 提交 → 失败回滚」通道），
+   * 因为它在服务端与名单存在**同一个策略文件**里，共用 revision 守卫。
+   * 打开后清单要等服务端回读才变（官方行由服务端过滤）——保存响应就是新的
+   * 完整 `GlobalValue`，`usePolicyPanel` 会整体替换。
+   */
+  const setShowOfficialSkills = useCallback(
+    (open: boolean) => {
+      void panel.commit((current) =>
+        current.policy.showOfficialSkills === open
+          ? null
+          : { ...current, policy: { ...current.policy, showOfficialSkills: open } },
+      )
+    },
+    // `panel.commit` 自身由 `useCallback` 固定；不用 `panel`（每次渲染都是新对象）。
+    [panel.commit],
+  )
 
   const refresh = (): void => {
     void panel.refresh()
@@ -118,8 +141,22 @@ export function GlobalPanel(props: GlobalPanelProps): ReactNode {
         <h2 className={styles.title}>{t('global.title')}</h2>
       </div>
 
-      {/* 视图过滤器（全部 / 已启用 / 已禁用）：只筛列表，不写策略。 */}
-      <ViewBar view={panel.view} onChange={panel.setView} t={t} />
+      {/*
+        视图过滤器（全部 / 已启用 / 已禁用）：只筛列表，不写策略。
+        官方 skill 展示开关挂在**同一行的右端**（`trailing`），不再单独占一行。
+      */}
+      <ViewBar
+        view={panel.view}
+        onChange={panel.setView}
+        t={t}
+        trailing={
+          <OfficialSkillsToggle
+            checked={value.policy.showOfficialSkills}
+            onChange={setShowOfficialSkills}
+            t={t}
+          />
+        }
+      />
 
       <CapabilityPanelBody
         t={t}

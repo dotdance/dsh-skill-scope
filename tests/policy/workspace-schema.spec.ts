@@ -8,7 +8,12 @@ import {
   validateWorkspaceInput,
 } from '../../src/policy/workspace-schema.ts'
 
-const globalPolicy = (skills: string[], mcps: string[] = []): LayerPolicy => ({ mode: 'blacklist', skills, mcps })
+const globalPolicy = (skills: string[], mcps: string[] = []): LayerPolicy => ({
+  mode: 'blacklist',
+  skills,
+  mcps,
+  showOfficialSkills: false,
+})
 
 describe('parseWorkspacePolicy（新格式）', () => {
   it('空文本按空策略处理，且不带 warning', () => {

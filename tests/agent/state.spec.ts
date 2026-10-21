@@ -7,7 +7,7 @@ import { EMPTY_POLICY, type LayerPolicy } from '../../src/policy/schema.ts'
 const agent = (id: string): AgentLike => ({ id, ctx: { get: () => undefined }, session: { id } })
 
 const defaultPolicy: LayerPolicy = EMPTY_POLICY
-const blacklistA: LayerPolicy = { mode: 'blacklist', skills: ['a'], mcps: [] }
+const blacklistA: LayerPolicy = { ...EMPTY_POLICY, skills: ['a'] }
 
 const effectiveOf = (global: LayerPolicy): EffectivePolicy => ({ global, workspace: null })
 

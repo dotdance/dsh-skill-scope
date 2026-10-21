@@ -60,9 +60,21 @@ export interface InventoryValue {
   mcps: McpRowValue[]
 }
 
+/**
+ * 全局层的策略形状。除两份名单外还带展示开关 `showOfficialSkills`
+ * （宿主 `LayerPolicy`，见 `src/policy/schema.ts`）。
+ */
+export interface GlobalPolicyValue {
+  mode: 'blacklist'
+  skills: string[]
+  mcps: string[]
+  /** 面板是否展示官方（`@deepseek-ai`）基础设施 skill。缺省 `false`。 */
+  showOfficialSkills: boolean
+}
+
 /** 全局路由的返回体。字段名与宿主 `GlobalValue` 逐一对应。 */
 export interface GlobalValue {
-  policy: { mode: 'blacklist'; skills: string[]; mcps: string[] }
+  policy: GlobalPolicyValue
   revision: string | null
   inventory: InventoryValue
 }
@@ -80,7 +92,7 @@ export interface GlobalValue {
  * 同一公式（`src/policy/evaluate.ts`）。
  */
 export interface WorkspaceValue {
-  global: { mode: 'blacklist'; skills: string[]; mcps: string[] }
+  global: GlobalPolicyValue
   workspace: { skills: Record<string, boolean>; mcps: Record<string, boolean> }
   revision: string | null
   cwd: string

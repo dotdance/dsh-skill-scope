@@ -1,6 +1,6 @@
 import { useCallback, useState, type ReactNode } from 'react'
 import { ApiError, post, ROUTES } from './api.ts'
-import { CapabilityPanelBody, ViewBar } from './CapabilityPanel.tsx'
+import { CapabilityPanelBody, OfficialSkillsToggle, ViewBar } from './CapabilityPanel.tsx'
 import { createDefaultTranslate } from './locales.ts'
 import {
   WORKSPACE_VIEW_ORDER,
@@ -98,12 +98,22 @@ export function WorkspaceModal(props: WorkspaceModalProps): ReactNode {
    * 比如排序、去重、上限截断）。其余视图字段保留读取时的那一份。
    */
   const save = useCallback(
-    async (current: WorkspaceValue, next: WorkspaceValue): Promise<WorkspaceValue> =>
-      post<WorkspaceValue>(ROUTES.workspaceSave, {
+    async (current: WorkspaceValue, next: WorkspaceValue): Promise<WorkspaceValue> => {
+      const body: Record<string, unknown> = {
         sessionId,
         workspace: next.workspace,
         revision: current.revision,
-      }),
+      }
+      /*
+       * 展示开关是**全局**状态（存在全局策略文件里），但工作区面板也展示它。
+       * **只在它真的变了才带上**：这份状态是读取那一刻的快照，可能已被别的面板改过；
+       * 每次保存都回传就等于用旧值覆盖别人的新值。服务端只改这一个键，名单按磁盘现值保留。
+       */
+      if (next.global.showOfficialSkills !== current.global.showOfficialSkills) {
+        body['showOfficialSkills'] = next.global.showOfficialSkills
+      }
+      return await post<WorkspaceValue>(ROUTES.workspaceSave, body)
+    },
     [sessionId],
   )
 
@@ -137,6 +147,27 @@ export function WorkspaceModal(props: WorkspaceModalProps): ReactNode {
   const load = useCallback(async (): Promise<WorkspaceValue> => loadWorkspace(sessionId), [sessionId])
 
   const panel = usePolicyPanel<WorkspaceValue>({ load, save, toggle, mergeSaved })
+
+  /**
+   * 官方 skill 展示开关（全局状态，本面板也展示）。
+   *
+   * 走 `panel.commit`：与服务端的「工作区保存」同一条通道（乐观改 → 提交 → 失败回滚）。
+   * 但工作区保存响应的 `inventory` **不参与 `mergeSaved`**（那份合并只取 revision/workspace，
+   * 见上面的注释），而开关恰恰会改变清单内容——所以成功后再 `refresh()` 一次，
+   * 让官方行真的出现或消失。失败时 `commit` 自己回滚并写 `panel.error`。
+   */
+  const setShowOfficialSkills = useCallback(
+    (open: boolean) => {
+      void panel
+        .commit((current) =>
+          current.global.showOfficialSkills === open
+            ? null
+            : { ...current, global: { ...current.global, showOfficialSkills: open } },
+        )
+        .then(() => panel.refresh())
+    },
+    [panel.commit, panel.refresh],
+  )
 
   const refresh = (): void => {
     void panel.refresh()
@@ -230,8 +261,23 @@ export function WorkspaceModal(props: WorkspaceModalProps): ReactNode {
           </p>
           {value.live ? <span hidden data-testid="workspace-live" /> : null}
 
-          {/* 视图过滤器（全部 / 已启用 / 已禁用）：只筛列表，不写策略。 */}
-          <ViewBar view={panel.view} onChange={panel.setView} t={t} views={WORKSPACE_VIEW_ORDER} />
+          {/*
+            视图过滤器（全部 / 已启用 / 已禁用）：只筛列表，不写策略。
+            官方 skill 展示开关与全局面板同一处位置（行尾），值也是同一个全局开关。
+          */}
+          <ViewBar
+            view={panel.view}
+            onChange={panel.setView}
+            t={t}
+            views={WORKSPACE_VIEW_ORDER}
+            trailing={
+              <OfficialSkillsToggle
+                checked={value.global.showOfficialSkills}
+                onChange={setShowOfficialSkills}
+                t={t}
+              />
+            }
+          />
         </div>
 
         <div className={styles.panelBody}>

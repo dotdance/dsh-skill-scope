@@ -63,6 +63,14 @@ The red circles above mark the two entry points: **Global Skills** in the left s
 - The search box **filters both the Skill and the MCP sections**, live as you type.
 - The list groups and collapses by source, so even a long inventory stays navigable.
 
+**Official skills are hidden by default**: the skills shipped by `@deepseek-ai` packages
+(`cordis-*` presets, `office-*` and so on) do not appear in the panel, and the model can still
+call them. To see them — or to switch them off — turn on **Show official skills** at the right end
+of the view bar: those rows come back into the list and can be switched off one by one like any
+other row. The switch is per machine (stored in `$DSH_HOME/skill-scope/global.json`); both the
+global panel and the project panel show it, they always read the same value, and turning it on
+from either panel affects every workspace.
+
 ### 2. The project panel — keep only what this one project needs
 
 In a **new session**, click **Workspace Skills** at the bottom right of the input box to open the project-scoped overlay (it floats above the current view):

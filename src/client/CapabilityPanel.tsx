@@ -20,6 +20,7 @@ import {
   CapabilityList,
   ErrorAlert,
   SearchIcon,
+  Switch,
   type CapabilityRow,
 } from './parts.tsx'
 import styles from './styles.module.css'
@@ -36,17 +37,24 @@ import { asRecord } from '../shared/unknown.ts'
  *
  * 按钮集合由 `views` 注入：全局层用 `VIEW_ORDER`（三种），工作区层用
  * `WORKSPACE_VIEW_ORDER`（多一个「与全局不同」）。
+ *
+ * `trailing` 渲染在**同一行的右端**（不是新起一行）：官方 skill 展示开关在全局
+ * 与工作区两个面板里都放这里，靠 `margin-left: auto` 贴右；窄容器里整行会换行，
+ * 开关自然落到下一行，不会挤压视图按钮。
  */
 export function ViewBar({
   view,
   onChange,
   t,
   views = VIEW_ORDER,
+  trailing,
 }: {
   view: PolicyView
   onChange: (next: PolicyView) => void
   t: Translate
   views?: readonly PolicyView[]
+  /** 行尾的附加控件（官方 skill 展示开关）。 */
+  trailing?: ReactNode
 }): ReactNode {
   return (
     <div className={styles.modeRow} data-testid="view-row">
@@ -64,7 +72,36 @@ export function ViewBar({
           {t(`view.${candidate}`)}
         </button>
       ))}
+      {trailing === undefined ? null : <div className={styles.modeRowTrailing}>{trailing}</div>}
     </div>
+  )
+}
+
+/**
+ * 「显示官方 Skill」开关（全局层状态，两个面板共用）。
+ *
+ * 它是**展示开关**：只决定官方（`@deepseek-ai`）行列不列，不关闭任何东西；打开后
+ * 那些行回到清单、可逐项关闭。值存在全局策略里，所以工作区面板读到的是同一个值，
+ * 两处永远同口径（写入由调用方注入：全局面板走 `global/save`，工作区面板附带在
+ * `workspace/save` 上，见两个外壳的注释）。
+ *
+ * 可见文案用短句（视图条只有一行），完整解释放在 `title`：鼠标悬停能看到
+ * 「默认隐藏」「这是全局开关」这两条容易误解的事实。
+ */
+export function OfficialSkillsToggle({
+  checked,
+  onChange,
+  t,
+}: {
+  checked: boolean
+  onChange: (next: boolean) => void
+  t: Translate
+}): ReactNode {
+  return (
+    <span className={styles.toggleRow} title={t('panel.showOfficialSkillsTitle')}>
+      <Switch checked={checked} label={t('panel.showOfficialSkills')} onChange={onChange} />
+      <span className={styles.toggleLabel}>{t('panel.showOfficialSkills')}</span>
+    </span>
   )
 }
 

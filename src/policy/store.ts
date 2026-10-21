@@ -138,6 +138,30 @@ export class PolicyStore {
     return await this.write(path, expected, () => serializeGlobalPolicy(policy))
   }
 
+  /**
+   * 只改全局层的**展示开关**（`showOfficialSkills`），两份名单保持磁盘上的现值。
+   *
+   * 为什么不能复用 `saveGlobal`：工作区面板也展示这个开关，但它拿不到全局文件的
+   * revision（两个文件各有一把乐观锁），而把面板手里的**旧名单**回写全局会覆盖掉
+   * 别人刚做的名单改动。所以在锁内「读—改—写」：只动这一个键，名单原样保留。
+   *
+   * 没有 revision 守卫是**有意**的：调用方没有可用的期望值。并发写仍被同一把文件锁
+   * 串行化，因此不会出现「读到旧内容再写回去」的窗口。
+   */
+  async setGlobalShowOfficialSkills(next: boolean): Promise<SaveOutcome> {
+    const path = globalPolicyPath()
+    return await this.write(
+      path,
+      null,
+      (currentText) => {
+        const current = currentText === null ? EMPTY_POLICY : parseGlobalPolicy(currentText).policy
+        return serializeGlobalPolicy({ ...current, showOfficialSkills: next })
+      },
+      // 跳过 revision 守卫：这是「只改一个键」的局部更新，不要求调用方持有版本。
+      false,
+    )
+  }
+
   async loadWorkspace(cwd: string): Promise<WorkspaceLoadResult> {
     const path = workspacePolicyPath(cwd)
     const text = await this.readText(path)
@@ -185,11 +209,12 @@ export class PolicyStore {
     path: string,
     expected: string | null | undefined,
     serialize: (currentText: string | null) => string | Promise<string>,
+    guard = true,
   ): Promise<SaveOutcome> {
     const previous = this.queues.get(path) ?? Promise.resolve()
     // 队列尾只用来**串行化**，不传递结果：下一个写入者无条件接在上一个之后，
     // 无论它是成功还是失败（失败由各自的 `next` 返回给调用方）。
-    const next = previous.then(() => this.writeLocked(path, expected, serialize))
+    const next = previous.then(() => this.writeLocked(path, expected, serialize, guard))
     this.queues.set(
       path,
       next.catch(() => {}),
@@ -201,6 +226,7 @@ export class PolicyStore {
     path: string,
     expected: string | null | undefined,
     serialize: (currentText: string | null) => string | Promise<string>,
+    guard: boolean,
   ): Promise<SaveOutcome> {
     try {
       // 先确保父目录存在：`withFileLock` 用 `writeFile(lockPath, …)` 加 `wx` 建锁，
@@ -218,19 +244,23 @@ export class PolicyStore {
 
         // revision 守卫（D1/D2）：`expected == null` 只允许创建新文件；
         // 非空 expected 必须与现状逐一匹配，否则说明别人已经改过。
-        if (expected === null || expected === undefined) {
-          if (currentRevision !== null) {
+        // `guard === false` 只用于「锁内读—改—写单个键」的局部更新（见
+        // `setGlobalShowOfficialSkills`）：它不覆盖名单，因此不需要版本依据。
+        if (guard) {
+          if (expected === null || expected === undefined) {
+            if (currentRevision !== null) {
+              return {
+                ok: false,
+                code: 'stale-revision',
+                message: '策略文件已存在，但本次保存没有携带 revision；请重新加载后再保存',
+              }
+            }
+          } else if (currentRevision !== expected) {
             return {
               ok: false,
               code: 'stale-revision',
-              message: '策略文件已存在，但本次保存没有携带 revision；请重新加载后再保存',
+              message: `策略文件已被其他写者修改（期望 revision ${expected}，当前 ${currentRevision ?? '不存在'}）；请重新加载后再保存`,
             }
-          }
-        } else if (currentRevision !== expected) {
-          return {
-            ok: false,
-            code: 'stale-revision',
-            message: `策略文件已被其他写者修改（期望 revision ${expected}，当前 ${currentRevision ?? '不存在'}）；请重新加载后再保存`,
           }
         }
 

@@ -32,7 +32,7 @@ const workspaceValue = {
    * 都会让断言失败。注意 `workspace` 里不要放清单里不存在的名字：分组用例会自带
    * 三行 skill 夹具，那份夹具里才有 `gbrain-status`。
    */
-  global: { mode: 'blacklist' as const, skills: [], mcps: ['gbrain'] },
+  global: { mode: 'blacklist' as const, skills: [], mcps: ['gbrain'], showOfficialSkills: false },
   workspace: { skills: { 'md-word-count': false }, mcps: {} },
   revision: 'r1',
   cwd: '/home/user/proj/demo',
@@ -278,6 +278,27 @@ describe('WorkspaceModal', () => {
 
     const bar = await screen.findByTestId('view-row')
     expect(within(bar).getByTestId('view-overridden').textContent).toBe('与全局不同')
+  })
+
+  it('shows the official-skills switch in the view bar and saves it with the workspace policy', async () => {
+    /*
+     * 开关是**全局**展示状态，但工作区面板也展示（用户要求）。它随 `workspace/save`
+     * 一起提交，服务端只改全局文件里的那一个键；`mergeSaved` 不合并 `inventory`，
+     * 所以成功后还会再读一次，让官方行真的出现。
+     */
+    render(<WorkspaceModal sessionId="s1" onClose={() => {}} />)
+    const bar = await screen.findByTestId('view-row')
+    const toggle = within(bar).getByRole('switch', { name: '显示官方 Skill' })
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+
+    await user.click(toggle)
+
+    const saves = fetchMock.mock.calls.filter((call) => String(call[0]) === '/api/skill-scope/workspace/save')
+    expect(saves.length).toBe(1)
+    const body = JSON.parse(String((saves[0]?.[1] as RequestInit | undefined)?.body ?? '{}')) as Record<string, unknown>
+    expect(body['showOfficialSkills']).toBe(true)
+    // 名单本身没变：只翻转展示开关。
+    expect(body['workspace']).toEqual({ skills: { 'md-word-count': false }, mcps: {} })
   })
 
   it('shows the workspace title with the project name', async () => {
