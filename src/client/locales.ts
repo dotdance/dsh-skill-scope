@@ -34,6 +34,12 @@ export const zh = {
   'view.enabled': '已启用',
   'view.disabled': '已禁用',
   'view.overridden': '与全局不同',
+  // 视图条右端的展示开关（全局 + 工作区两个面板都有）。**只改「列不列」，不改「开不开」**：
+  // 打开它不会关闭任何官方 skill，只是把那些行放回清单，让你能逐项关。缺省关。
+  // 视图条只有一行，所以可见文案用短句；完整解释（默认隐藏、这是全局开关）放进 title，
+  // 避免在两个面板里都被误读成「本工程的设置」。
+  'panel.showOfficialSkills': '显示官方 Skill',
+  'panel.showOfficialSkillsTitle': '全局开关：显示 @deepseek-ai 官方包自带的 Skill（默认隐藏；打开后可逐项关闭）',
   'section.skills': 'Skill',
   'section.mcps': 'MCP',
   'search.placeholder': '搜索',
@@ -76,6 +82,9 @@ export const en: Record<keyof typeof zh, string> = {
   'view.enabled': 'Enabled',
   'view.disabled': 'Disabled',
   'view.overridden': 'Differs from global',
+  'panel.showOfficialSkills': 'Show official skills',
+  'panel.showOfficialSkillsTitle':
+    'Global switch: show skills bundled by @deepseek-ai packages (hidden by default; switch them off one by one once shown)',
   'section.skills': 'Skills',
   'section.mcps': 'MCP',
   'search.placeholder': 'Search',

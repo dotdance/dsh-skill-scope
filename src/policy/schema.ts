@@ -20,21 +20,42 @@ export type PolicyMode = 'default' | 'blacklist'
  * 工作区层**不再共用此形状**：它存的是逐项绝对状态（`名字 → 布尔`），
  * 见 `./workspace-schema.ts`。两层形状分家是「工作区可以打开全局关着的项」
  * 这条语义变更的直接结果——黑名单数组表达不了「明令开」。
+ *
+ * 除两份名单外，全局层还带一个**展示开关** `showOfficialSkills`（见该字段注释）。
+ * 它不属于「关掉谁」，但只影响全局层——工作区的展示口径跟随它，所以放在这个
+ * 随全局文件落盘的形状里，比新开一个文件少一套 revision/锁语义。
  */
 export interface LayerPolicy {
   mode: PolicyMode
   skills: string[]
   mcps: string[]
+  /**
+   * 面板是否展示官方（`@deepseek-ai`）基础设施 skill。**缺省 `false`（不展示）**。
+   *
+   * 关（`false`）：官方 skill 不进清单——面板上完全没有这些行，用户也无法开关它们，
+   * 但模型仍可自动调用（口径是「不展示」，不是「关闭」）。
+   * 开（`true`）：这些行回到清单，按普通行处理——本地面板可以逐项关掉它们，
+   * 关掉后由 Agent 作用域的 shadow 真正挡掉模型的自动调用。
+   *
+   * 它是**单机级展示口径**，不随工作区变化：两个面板读同一份全局策略，因此
+   * 「全局面板显示什么」与「工作区面板显示什么」永远同口径。
+   */
+  showOfficialSkills: boolean
 }
 
 /**
- * 缺省策略：两份空名单，等价于「本层不收窄」。
+ * 缺省策略：两份空名单 + 不展示官方 skill，等价于「本层不收窄」。
  *
  * 写 `blacklist` 而非 `default`：二者在空名单下行为完全相同，但 `blacklist` 是
  * **唯一会被求值器采纳的模式**，用它当缺省可以避免「存进去的 mode 与读回来
  * 归一后的 mode 不一致」这种需要额外解释的状态。
  */
-export const EMPTY_POLICY: LayerPolicy = { mode: 'blacklist', skills: [], mcps: [] }
+export const EMPTY_POLICY: LayerPolicy = {
+  mode: 'blacklist',
+  skills: [],
+  mcps: [],
+  showOfficialSkills: false,
+}
 
 /** Skill 名形状（与 `dsh-skill` 的命名一致，见设计 3.1）。 */
 export const SKILL_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
@@ -85,6 +106,9 @@ const lenientPolicySchema = (fallbackMode: PolicyMode) =>
       .max(MAX_NAMES)
       .catch([])
       .default([]),
+    // 展示开关与两份名单同一口径：坏值 / 缺键都退回缺省 `false`（不展示），
+    // 由 `normalizePolicy` 记 warning 指出被回退的那个键。
+    showOfficialSkills: z.boolean().catch(false).default(false),
   })
 
 /**
@@ -104,6 +128,7 @@ export function normalizePolicy(
     mode: parsed.data.mode,
     skills: SORTED_UNIQUE(parsed.data.skills),
     mcps: SORTED_UNIQUE(parsed.data.mcps),
+    showOfficialSkills: parsed.data.showOfficialSkills,
   }
   // 逐字段比对，指出被静默回退的最小集合，便于用户定位手写错误的键。
   //
@@ -115,6 +140,11 @@ export function normalizePolicy(
   const drifted: string[] = []
   if (source?.skills !== undefined && !sameSet(source.skills, policy.skills)) drifted.push('skills')
   if (source?.mcps !== undefined && !sameSet(source.mcps, policy.mcps)) drifted.push('mcps')
+  // 展示开关只有「是 / 不是布尔」两种坏法；后者会被 `.catch()` 静默退回 `false`，
+  // 必须点名，否则用户看到「官方 skill 又不见了」却找不到原因。
+  if (source?.showOfficialSkills !== undefined && source.showOfficialSkills !== policy.showOfficialSkills) {
+    drifted.push('showOfficialSkills')
+  }
   const migratedMode = source?.mode !== undefined && source.mode !== policy.mode
   if (drifted.length > 0) {
     const migrated = migratedMode
@@ -168,8 +198,18 @@ export function serializeGlobalPolicy(policy: LayerPolicy): string {
 // 工作区层的解析与序列化**不在这里**：它的文件形状与全局层不同
 // （逐项绝对状态，不是黑名单），见 `./workspace-schema.ts`。
 
-function toRows(policy: LayerPolicy): { mode: PolicyMode; skills: string[]; mcps: string[] } {
-  return { mode: policy.mode, skills: SORTED_UNIQUE(policy.skills), mcps: SORTED_UNIQUE(policy.mcps) }
+function toRows(policy: LayerPolicy): {
+  mode: PolicyMode
+  skills: string[]
+  mcps: string[]
+  showOfficialSkills: boolean
+} {
+  return {
+    mode: policy.mode,
+    skills: SORTED_UNIQUE(policy.skills),
+    mcps: SORTED_UNIQUE(policy.mcps),
+    showOfficialSkills: policy.showOfficialSkills,
+  }
 }
 
 /**
@@ -183,6 +223,10 @@ function toRows(policy: LayerPolicy): { mode: PolicyMode; skills: string[]; mcps
  *
  * 名单元素的**形状**不在这里校验，由 `validatePolicyInput` 逐个过正则，
  * 这样 `message` 才能点名第一个不合法的名字。
+ *
+ * `showOfficialSkills` **可选**：缺键按 `false`（保持旧行为）。旧版面板/脚本只送
+ * 两份名单时不会因此被 400 拒绝——代价是那次保存会把展示开关重置成「不展示」，
+ * 这是可自愈的展示状态，比拒绝一次策略写入轻。
  */
 const strictPolicySchema = z.object({
   mode: z
@@ -190,6 +234,7 @@ const strictPolicySchema = z.object({
     .transform((): PolicyMode => 'blacklist'),
   skills: z.array(z.string()).max(MAX_NAMES),
   mcps: z.array(z.string()).max(MAX_NAMES),
+  showOfficialSkills: z.boolean().optional().default(false),
 })
 
 /**
@@ -204,12 +249,15 @@ export function validatePolicyInput(raw: unknown): { ok: true; policy: LayerPoli
   if (!parsed.success) {
     return { ok: false, message: `策略体不合法：${parsed.error.issues[0]?.message ?? parsed.error.message}` }
   }
-  const { mode, skills, mcps } = parsed.data
+  const { mode, skills, mcps, showOfficialSkills } = parsed.data
   for (const name of skills) {
     if (!SKILL_NAME_RE.test(name)) return { ok: false, message: `Skill 名不合法：${name}` }
   }
   for (const name of mcps) {
     if (!MCP_NAME_RE.test(name)) return { ok: false, message: `MCP 名不合法：${name}` }
   }
-  return { ok: true, policy: { mode, skills: SORTED_UNIQUE(skills), mcps: SORTED_UNIQUE(mcps) } }
+  return {
+    ok: true,
+    policy: { mode, skills: SORTED_UNIQUE(skills), mcps: SORTED_UNIQUE(mcps), showOfficialSkills },
+  }
 }

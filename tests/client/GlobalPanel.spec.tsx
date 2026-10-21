@@ -24,7 +24,7 @@ function jsonOk(body: unknown, status = 200): Response {
 }
 
 const globalValue = {
-  policy: { mode: 'blacklist' as const, skills: [], mcps: [] },
+  policy: { mode: 'blacklist' as const, skills: [], mcps: [], showOfficialSkills: false },
   revision: 'r1',
   inventory: {
     skills: [
@@ -237,6 +237,31 @@ describe('GlobalPanel', () => {
       // 关键断言：三次切换视图，保存请求数一次也没变。
       const savesAfter = fetchMock.mock.calls.filter((call) => String(call[0]).includes('save')).length
       expect(savesAfter).toBe(savesBefore)
+    })
+
+    /**
+     * 官方 skill 展示开关：它是**全局面板独有**的入口（存在全局策略里，工作区面板
+     * 只读同一个值），所以这条用例同时钉住「开关在」「提交带上了它」。
+     */
+    it('renders the official-skills switch in the view bar and submits it with the policy', async () => {
+      render(<GlobalPanel />)
+      // **同一行**：开关挂在视图条右端（`trailing`），不是单独一行。
+      const bar = await screen.findByTestId('view-row')
+      const toggle = within(bar).getByRole('switch', { name: '显示官方 Skill' })
+      // 用属性读法而不是 `toHaveProperty`（理由见本文件 160 行那段说明）。
+      expect(toggle.getAttribute('aria-checked')).toBe('false')
+
+      await user.click(toggle)
+
+      const saves = fetchMock.mock.calls.filter((call) => String(call[0]).includes('save'))
+      expect(saves.length).toBeGreaterThan(0)
+      const body = JSON.parse(String((saves.at(-1)?.[1] as RequestInit | undefined)?.body ?? '{}')) as {
+        showOfficialSkills?: boolean
+        skills: string[]
+      }
+      // 只改展示开关，不动名单：打开它不会关闭任何官方 skill。
+      expect(body.showOfficialSkills).toBe(true)
+      expect(body.skills).toEqual([])
     })
 
     it('writes the name into the list when disabling, and removes it when enabling', async () => {

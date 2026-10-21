@@ -84,7 +84,7 @@ describe('PolicyStore', () => {
 
   it('creates a missing file when expected is null', async () => {
     const { store, files } = makeStore()
-    const outcome = await store.saveGlobal({ mode: 'blacklist', skills: ['a'], mcps: [] }, null)
+    const outcome = await store.saveGlobal({ mode: 'blacklist', skills: ['a'], mcps: [], showOfficialSkills: false }, null)
     expect(outcome.ok).toBe(true)
     expect(outcome).toMatchObject({ revision: sha256Hex(files.get(globalPolicyPath())!) })
   })
@@ -92,14 +92,50 @@ describe('PolicyStore', () => {
   it('replaces a present file when expected matches the current revision', async () => {
     const { store, files } = makeStore({ [globalPolicyPath()]: serializeGlobalPolicy(EMPTY_POLICY) })
     const first = await store.loadGlobal()
-    const outcome = await store.saveGlobal({ mode: 'blacklist', skills: ['a'], mcps: [] }, first.revision)
+    const outcome = await store.saveGlobal({ mode: 'blacklist', skills: ['a'], mcps: [], showOfficialSkills: false }, first.revision)
     expect(outcome.ok).toBe(true)
     expect(files.get(globalPolicyPath())).toContain('"a"')
   })
 
+  /**
+   * 工作区面板也展示「显示官方 Skill」开关，而它存在**全局**文件里；工作区面板没有
+   * 全局 revision。`setGlobalShowOfficialSkills` 因此走锁内「读—改—写」，只动那一个键。
+   */
+  it('updates only the display switch and keeps the name lists', async () => {
+    const { store, files } = makeStore({
+      [globalPolicyPath()]: serializeGlobalPolicy({
+        mode: 'blacklist',
+        skills: ['a'],
+        mcps: ['gbrain'],
+        showOfficialSkills: false,
+      }),
+    })
+    const outcome = await store.setGlobalShowOfficialSkills(true)
+    expect(outcome.ok).toBe(true)
+    // 名单逐字保留：这是「只改一个键」，不能用面板手里的旧名单覆盖磁盘。
+    expect(JSON.parse(files.get(globalPolicyPath())!)).toEqual({
+      mode: 'blacklist',
+      skills: ['a'],
+      mcps: ['gbrain'],
+      showOfficialSkills: true,
+    })
+  })
+
+  it('creates the global file when the display switch is set for the first time', async () => {
+    const { store, files } = makeStore()
+    const outcome = await store.setGlobalShowOfficialSkills(true)
+    expect(outcome.ok).toBe(true)
+    expect(JSON.parse(files.get(globalPolicyPath())!)).toEqual({
+      mode: 'blacklist',
+      skills: [],
+      mcps: [],
+      showOfficialSkills: true,
+    })
+  })
+
   it('rejects a save whose expected revision does not match', async () => {
     const { store } = makeStore({ [globalPolicyPath()]: serializeGlobalPolicy(EMPTY_POLICY) })
-    const again = await store.saveGlobal({ mode: 'blacklist', skills: ['b'], mcps: [] }, 'stale-version')
+    const again = await store.saveGlobal({ mode: 'blacklist', skills: ['b'], mcps: [], showOfficialSkills: false }, 'stale-version')
     expect(again).toEqual({ ok: false, code: 'stale-revision', message: expect.any(String) })
   })
 
@@ -122,8 +158,8 @@ describe('PolicyStore', () => {
   it('serializes concurrent saves through one queue', async () => {
     const { store } = makeStore()
     const [a, b] = await Promise.all([
-      store.saveGlobal({ mode: 'blacklist', skills: ['a'], mcps: [] }, null),
-      store.saveGlobal({ mode: 'blacklist', skills: ['b'], mcps: [] }, 'stale-version'),
+      store.saveGlobal({ mode: 'blacklist', skills: ['a'], mcps: [], showOfficialSkills: false }, null),
+      store.saveGlobal({ mode: 'blacklist', skills: ['b'], mcps: [], showOfficialSkills: false }, 'stale-version'),
     ])
     expect(a.ok).toBe(true)
     expect(b).toEqual({ ok: false, code: 'stale-revision', message: expect.any(String) })
@@ -184,14 +220,14 @@ describe('真实文件系统：全局策略目录不存在时也能写入（回�
 
     const store = new PolicyStore({ fs: nodePolicyFs, logger: { warn: () => {} } })
 
-    const outcome = await store.saveGlobal({ mode: 'blacklist', skills: ['b', 'a'], mcps: [] }, null)
+    const outcome = await store.saveGlobal({ mode: 'blacklist', skills: ['b', 'a'], mcps: [], showOfficialSkills: false }, null)
     expect(outcome.ok).toBe(true)
     // 目录被建出来了，文件真的落盘。
     expect(existsSync(target)).toBe(true)
     // 落盘形状是**扁平**的 `{mode,skills,mcps}`（`serializeGlobalPolicy` → `toRows`，
     // 没有 `.default` 包装——那是工作区文件才有的层名）；名字去重并升序（`SORTED_UNIQUE`）。
     const written = JSON.parse(await readFile(target, 'utf8'))
-    expect(written).toEqual({ mode: 'blacklist', skills: ['a', 'b'], mcps: [] })
+    expect(written).toEqual({ mode: 'blacklist', skills: ['a', 'b'], mcps: [], showOfficialSkills: false })
   })
 })
 
@@ -235,7 +271,7 @@ describe('工作区策略', () => {
   it('drops entries that agree with the global layer when saving', async () => {
     // 写盘按**全局当前状态**剔除同向条目。全局在锁内读取，才不会在两次读之间漂移。
     const { store, files } = makeStore({
-      [globalPolicyPath()]: serializeGlobalPolicy({ mode: 'blacklist', skills: ['a'], mcps: [] }),
+      [globalPolicyPath()]: serializeGlobalPolicy({ mode: 'blacklist', skills: ['a'], mcps: [], showOfficialSkills: false }),
     })
     const outcome = await store.saveWorkspace(cwd, { skills: { a: false, b: false }, mcps: {} }, null)
     expect(outcome.ok).toBe(true)

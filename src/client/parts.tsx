@@ -580,7 +580,7 @@ function SkillGroups(params: {
  * 两个内层 `span` 都是 `aria-hidden` 的纯装饰——可达名由 `button` 的 `aria-label` 提供，
  * 不能让屏幕阅读器把轨道与滑块也念一遍。改结构的原因见 `styles.module.css` 的 `.switch` 注释。
  */
-function Switch(props: { checked: boolean; label: string; onChange: (next: boolean) => void }): ReactNode {
+export function Switch(props: { checked: boolean; label: string; onChange: (next: boolean) => void }): ReactNode {
   return (
     <button
       type="button"

@@ -15,6 +15,7 @@ const global = (skills: string[], mcps: string[] = []): LayerPolicy => ({
   mode: 'blacklist',
   skills,
   mcps,
+  showOfficialSkills: false,
 })
 
 const workspace = (skills: Record<string, boolean> = {}, mcps: Record<string, boolean> = {}): WorkspacePolicy => ({

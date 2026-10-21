@@ -6,9 +6,11 @@
  * 它刻意不判定可见性：策略求值在 `policy/evaluate.ts`，这里只提供「有哪些」。
  * **唯一例外**是官方基础设施 skill 的「不展示」过滤（见 `./official.ts`），
  * 因为它必须与「有哪些」同口径，放到调用点会造成全局/工作区两份清单分叉。
+ * 是否滤掉由调用方的 `InventoryOptions.showOfficialSkills` 决定——**没有缺省**，
+ * 见该接口的注释。
  */
 
-import { isOfficialSkillPath } from './official.ts'
+import { isOfficialSkill } from './official.ts'
 
 /** 面板/求值共用的一行 skill。字段全部必有，缺省由本模块补，调用方不必再兜。 */
 export interface SkillRow {
@@ -68,12 +70,28 @@ export interface SkillsServiceLike {
 }
 
 /**
+ * 读清单时的展示口径。
+ *
+ * `showOfficialSkills` **刻意没有缺省值**：每个调用点都必须显式回答「这一份清单
+ * 要不要官方 skill」。给 `false` 当缺省最省事，但「掩蔽集的输入」与「面板展示」
+ * 是两个消费者——前者**永远**要全量（见 `src/agent/hooks.ts` 的 `computeHidden`），
+ * 后者跟全局展示开关走。缺省值会让其中一个调用点靠惯性拿到错误口径，且不报错。
+ */
+export interface InventoryOptions {
+  /** `true` = 保留官方（`@deepseek-ai`）基础设施 skill；`false` = 从清单里滤掉。 */
+  showOfficialSkills: boolean
+}
+
+/**
  * 读全局层：`snapshot({})`——**空对象，不带 `cwd`、不带 `scope`**。
  * 带上 `cwd` 会让 `dsh-skill` 追加工作区的 skill provider，全局清单就被污染了。
  */
-export async function readGlobalSkills(skills: SkillsServiceLike): Promise<SkillInventory> {
+export async function readGlobalSkills(
+  skills: SkillsServiceLike,
+  options: InventoryOptions,
+): Promise<SkillInventory> {
   const result = await skills.snapshot({})
-  return { rows: toRows(result.skills), complete: result.complete }
+  return { rows: toRows(result.skills, options.showOfficialSkills), complete: result.complete }
 }
 
 /**
@@ -101,23 +119,28 @@ export async function readAgentSkills(
   skills: SkillsServiceLike,
   agent: unknown,
   cwd: string,
+  options: InventoryOptions,
 ): Promise<SkillInventory> {
   const result = await skills.snapshot({ cwd, scope: agent })
-  return { rows: toRows(result.skills), complete: result.complete }
+  return { rows: toRows(result.skills, options.showOfficialSkills), complete: result.complete }
 }
 
 /**
- * 把宿主返回的 raw skill 收敛成 `SkillRow`，并**滤掉官方 `@deepseek-ai` skill**。
+ * 把宿主返回的 raw skill 收敛成 `SkillRow`，并按 `showOfficialSkills` 决定是否
+ * 滤掉官方 `@deepseek-ai` skill。
  *
  * 两个读函数都走这一行，所以全局层与工作区层**口径必然一致**——不会出现
- * 「全局视图藏了、工作区视图还在」这类分歧。判定与取舍见 `./official.ts`。
+ * 「全局视图藏了、工作区视图还在」这类分歧。判定与取舍见 `./official.ts`
+ * （路径含 `@deepseek-ai`，或 provider 在官方白名单里——后者覆盖没有 `path` 的
+ * `dsh-office` 那 7 条）。
  *
- * 注意过滤**只影响清单读取**：`src/agent/hooks.ts` 的遮蔽集合是从清单反推的
- * （`清单 − 允许集`），被滤掉的名字不在清单里 ⇒ **模型仍可调用它们**，
- * 口径是「只隐藏不控制」。
+ * **显示开关与掩蔽集是两件事，别合并**：面板用 `showOfficialSkills` 决定「列不列」，
+ * 而 `src/agent/hooks.ts` 的掩蔽集合**永远**用全量清单（`showOfficialSkills: true`）。
+ * 否则「打开开关 → 关掉一条官方 skill → 关掉开关」之后，掩蔽集会因为清单里没有它
+ * 而静默失效，那条 skill 重新对模型可见——用户看不到任何提示。
  */
-function toRows(raw: ReadonlyArray<Parameters<typeof toRow>[0]>): SkillRow[] {
-  return raw.filter((entry) => !isOfficialSkillPath(entry.path)).map(toRow)
+function toRows(raw: ReadonlyArray<Parameters<typeof toRow>[0]>, showOfficialSkills: boolean): SkillRow[] {
+  return raw.filter((entry) => showOfficialSkills || !isOfficialSkill(entry)).map(toRow)
 }
 
 /** 可选字段收敛：`description` → `''`，`source`/`provider` → `'unknown'`，`modelInvocable` 缺省 `true`。 */
@@ -186,6 +209,20 @@ export function sourceLabelOf(row: SkillRow): string | null {
 export const UNGROUPED_KEY = '\u0000ungrouped'
 
 /**
+ * 插件 provider 分组的 key 前缀（**没有 `path` 的行**用）。
+ *
+ * 为什么需要它：分组原先只认 `path`，于是「官方包自己注册、只给 `locator`/`resourceBase`
+ * 不给 `path`」的行（实测 `@deepseek-ai/dsh-skill-office` 的 7 条 `office-*`，
+ * 见 `dsh-skill-office/lib/index.js:61-101`）会掉进「运行时注入」组——与它们自己
+ * 那一行「来源：dsh-office」直接矛盾。provider 是注册表的强制约束（宿主校验
+ * `candidate.provider === providerName`，`dsh-skill/lib/index.js:461`），
+ * 因此它是这类行唯一权威的「谁提供的」信号。
+ *
+ * 前缀不含 `/`，而真实分组 key 全部来自绝对路径（必含 `/`），所以不可能相撞。
+ */
+const PROVIDER_GROUP_PREFIX = 'provider:'
+
+/**
  * 从一个 skill 路径算出它的**注册根目录**（分组 key）。
  *
  * **规则：向上找最近的名为 `skills` 的目录。**
@@ -196,9 +233,18 @@ export const UNGROUPED_KEY = '\u0000ungrouped'
  *
  * 兜底返回上一级目录：当路径里**没有** `skills` 这一级时（provider 自定义了别的目录名），
  * 至少还归到技能目录的父目录，不会退化成「每个技能一组」。
+ *
+ * 没有 `path` 时按 **provider 分组**（见 `PROVIDER_GROUP_PREFIX`）；只有内置 provider
+ * （`filesystem` 负责磁盘、`runtime` 由注册表直接注入、`unknown` 判定失败）
+ * 才落到「运行时注入」哨兵——它们确实没有可展示的出处。
  */
 export function groupKeyOf(row: SkillRow): string {
-  if (row.path === undefined) return UNGROUPED_KEY
+  if (row.path === undefined) {
+    if (row.provider !== 'filesystem' && row.provider !== 'runtime' && row.provider !== 'unknown') {
+      return `${PROVIDER_GROUP_PREFIX}${row.provider}`
+    }
+    return UNGROUPED_KEY
+  }
   const parts = row.path.split('/')
   for (let i = parts.length - 2; i >= 0; i--) {
     if (parts[i] === 'skills') return parts.slice(0, i + 1).join('/')
@@ -209,14 +255,16 @@ export function groupKeyOf(row: SkillRow): string {
 /**
  * 一个分组 key 的**显示名**。
  *
- * 两条规则，按序判定：
- * 1. **插件**：路径形如 `<...>/node_modules/<包名>/skills` 时取 `<包名>`
+ * 三条规则，按序判定：
+ * 1. **插件 provider**：key 带 `PROVIDER_GROUP_PREFIX`（没有 `path` 的行，如
+ *    `dsh-office`）⇒ 直接取 provider 名。它与该行详情里的「来源」逐字相同。
+ * 2. **插件包**：路径形如 `<...>/node_modules/<包名>/skills` 时取 `<包名>`
  *    （实测命中 `superpowers-dsh`、`gbrain`）。插件名比一长串绝对路径可读得多，
  *    也正是用户举例的「插件 a、插件 b」。
- * 2. **文件夹**：取注册根的 basename；**当 basename 就是 `skills` 时再退一级**
+ * 3. **文件夹**：取注册根的 basename；**当 basename 就是 `skills` 时再退一级**
  *    取父目录名（`.agents/skills` → `.agents`，`sand/skills` → `sand`）。
  *
- * 规则 2 的后半句是**必需的，不是美化**：实测 6 组里有 3 组（`.agents/skills`、
+ * 规则 3 的后半句是**必需的，不是美化**：实测 6 组里有 3 组（`.agents/skills`、
  * `sand/skills`、`LocalAgent/skills`）的 basename 都是 `skills`，不退这一级就会得到
  * 三个一模一样的组名，用户完全无法区分——与「按来源分组」的目标直接相反。
  *
@@ -225,6 +273,7 @@ export function groupKeyOf(row: SkillRow): string {
  */
 export function groupLabelOf(key: string): string {
   if (key === UNGROUPED_KEY) return ''
+  if (key.startsWith(PROVIDER_GROUP_PREFIX)) return key.slice(PROVIDER_GROUP_PREFIX.length)
   const parts = key.split('/')
   // `node_modules/<包名>/skills` → 取第 3 段。
   const nodeModulesAt = parts.lastIndexOf('node_modules')

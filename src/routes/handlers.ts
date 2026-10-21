@@ -52,14 +52,17 @@ export interface RouteDeps {
  * 一个 skill 行 + 它的**来源分组**（服务端算好）。
  *
  * **为什么分组在服务端算**：分组要靠 `path` 上卷到注册根，还要从
- * `node_modules/<包名>` 提取插件名。这套归一化只该有一份实现；放前端会让
- * 「插件名怎么来的」「没有 skills 这一级怎么兜」这些细节漂移成两份。
- * 前端只拿到 `group`（排序/折叠用的稳定 key）与 `groupLabel`（显示名）。
+ * `node_modules/<包名>` 提取插件名，无 `path` 的行还要退回 provider 名。这套归一化
+ * 只该有一份实现；放前端会让「插件名怎么来的」「没有 skills 这一级怎么兜」这些细节
+ * 漂移成两份。前端只拿到 `group`（排序/折叠用的稳定 key）与 `groupLabel`（显示名）。
  */
 export type GroupedSkillRow = SkillRow & {
-  /** 分组的稳定 key（注册根绝对路径；无路径的 runtime skill 用 `UNGROUPED_KEY`）。 */
+  /**
+   * 分组的稳定 key：有 `path` 时是注册根绝对路径；没有 `path` 的插件 provider 行是
+   * `provider:<名字>`（如 `provider:dsh-office`）；内置 provider 的无路径行用 `UNGROUPED_KEY`。
+   */
   group: string
-  /** 分组的显示名（插件名或文件夹 basename）；无路径组为 `''`，由前端换成文案。 */
+  /** 分组的显示名（插件名、provider 名或文件夹 basename）；无路径组为 `''`，由前端换成文案。 */
   groupLabel: string
   /**
    * 真实来源标签：插件 provider 名，或磁盘 skill 的注册根绝对路径。
@@ -206,13 +209,19 @@ function saveFailure(
  * **每次调用都重读 store.loadGlobal()**。策略是外部同步可读状态，任何跨请求缓存
  * 都会让用户在别处改过的文件在面板上不可见（设计 3.7 的「策略不冻结」）。
  *
+ * **官方 Skill 是否出现，跟全局策略的展示开关 `showOfficialSkills` 走**：关（缺省）时
+ * 这些行整行不出现；开时按普通行列出，可逐项关闭。这是本函数**唯一**按行过滤的规则，
+ * `modelInvocable === false` 的行仍然全部保留（见下）。
+ *
  * **全局清单列宿主全部 Skill，不做 `modelInvocable` 过滤**（用户明确要求）。
  * 理由是全局层是**决定开关的地方**：若在此隐藏 `modelInvocable === false` 的能力，
  * 用户就再也找不到入口把它们重新打开。工作区层才做收窄（见 `handleWorkspace`）。
  */
 async function readGlobalValue(deps: RouteDeps): Promise<GlobalValue> {
   const loaded = await deps.store.loadGlobal()
-  const skills = await readGlobalSkills(deps.skills)
+  const skills = await readGlobalSkills(deps.skills, {
+    showOfficialSkills: loaded.policy.showOfficialSkills,
+  })
   const mcps = await readMcpRows(deps)
   return {
     policy: loaded.policy,
@@ -306,15 +315,19 @@ export async function handleWorkspace(body: unknown, deps: RouteDeps): Promise<E
  * 去重按 `name`，同名时**以全局行为准**（来源信息更完整），会话侧只补缺。
  * `complete` 取两者之**与**：两份清单都完整，并集才完整；任一残缺时 UI 按既有
  * 契约拒绝收窄写入。
+ *
+ * `showOfficialSkills` 与全局面板同一口径（取自全局策略）：两份清单都用同一个值，
+ * 否则会出现「全局面板里有、工作区面板里没有」这种同一条事实两种呈现的分叉。
  */
 async function readWorkspaceSkills(
   deps: RouteDeps,
   view: SessionView,
   cwd: string,
+  showOfficialSkills: boolean,
 ): Promise<SkillInventory> {
-  const global = await readGlobalSkills(deps.skills)
+  const global = await readGlobalSkills(deps.skills, { showOfficialSkills })
   if (view.agent === null) return global
-  const scoped = await readAgentSkills(deps.skills, view.agent, cwd)
+  const scoped = await readAgentSkills(deps.skills, view.agent, cwd, { showOfficialSkills })
   const present = new Set(global.rows.map((row) => row.name))
   const extra = scoped.rows.filter((row) => !present.has(row.name))
   return { rows: [...global.rows, ...extra], complete: global.complete && scoped.complete }
@@ -332,7 +345,8 @@ async function readWorkspaceSkills(
  *    替换对象会让 `dsh-scope` 按身份查不到层、静默退化成全局层。
  * 2. 再读全局策略与全局清单。它们不再用来「摘除」任何行，只提供两件事：
  *    ①三态里「跟随全局」的取值来源（`global` 字段）②清单并集的基底。
- * 3. 组装 skill 清单与 MCP 清单——**两者都不排除任何项**。
+ * 3. 组装 skill 清单与 MCP 清单——除全局展示开关（`showOfficialSkills`）关掉的
+ *    官方 skill 外，**两者都不排除任何项**。
  *
  * 调用方（保存路由）必须在调用本函数**之前**完成写盘与 `reapplyAfterSave`：
  * 本函数只读，不负责落地。
@@ -343,7 +357,7 @@ async function buildWorkspaceView(deps: RouteDeps, view: SessionView): Promise<W
   // 读取期的 warning（旧格式并存、字段被回退）不当错误：记一条日志，面板照常打开。
   if (loaded.warning !== undefined) deps.logger.warn(`dsh-skill-scope: ${loaded.warning}（${loaded.path}）`)
   const global = await deps.store.loadGlobal()
-  const skills = await readWorkspaceSkills(deps, view, cwd)
+  const skills = await readWorkspaceSkills(deps, view, cwd, global.policy.showOfficialSkills)
   return {
     global: global.policy,
     workspace: loaded.policy,
@@ -366,8 +380,15 @@ async function buildWorkspaceView(deps: RouteDeps, view: SessionView): Promise<W
  * 入参是 `payload.workspace`（`{ skills: {名字: 布尔}, mcps: {...} }`），
  * 不是全局那套 `{ mode, skills[], mcps[] }`——两层形状已分家，混用会在校验处被拒。
  *
- * **组装与读取路由共用 `buildWorkspaceView`**，本函数只保留属于「保存」的三步：
- * 校验入参 → 写盘 → 重新落地 → 回读。
+ * 顶层还可以带 `showOfficialSkills`（布尔，可选）：工作区面板也展示这个**全局**开关，
+ * 而它存在全局策略文件里。这里只改那一个键（`store.setGlobalShowOfficialSkills`
+ * 在锁内读—改—写，名单按磁盘现值保留），不要求调用方持有全局 revision——工作区面板
+ * 本来就没有它。写入顺序是「先全局开关、后工作区策略」：开关写失败就整体失败，
+ * 不会留下「工作区已改、开关没改」的半截状态；反之工作区写失败（如 stale-revision）时
+ * 开关已经落盘——面板会整体回滚并提示刷新重试，以磁盘为准。
+ *
+ * **组装与读取路由共用 `buildWorkspaceView`**，本函数只保留属于「保存」的几步：
+ * 校验入参 → 写全局展示开关（如有）→ 写工作区策略 → 重新落地 → 回读。
  */
 export async function handleWorkspaceSave(body: unknown, deps: RouteDeps): Promise<Envelope<WorkspaceValue>> {
   try {
@@ -377,6 +398,18 @@ export async function handleWorkspaceSave(body: unknown, deps: RouteDeps): Promi
     const validated = validateWorkspaceInput(payload?.['workspace'])
     if (!validated.ok) {
       return { ok: false, error: { code: 'bad-request', message: validated.message } }
+    }
+    const display = payload?.['showOfficialSkills']
+    if (display !== undefined && typeof display !== 'boolean') {
+      return { ok: false, error: { code: 'bad-request', message: 'showOfficialSkills 必须是 true 或 false' } }
+    }
+    if (display !== undefined) {
+      const current = await deps.store.loadGlobal()
+      // 值没变就不写：避免只改一项名单时也去动全局文件（会白白改掉它的 revision）。
+      if (current.policy.showOfficialSkills !== display) {
+        const written = await deps.store.setGlobalShowOfficialSkills(display)
+        if (!written.ok) return saveFailure(written)
+      }
     }
     const saved = await deps.store.saveWorkspace(resolved.view.cwd, validated.policy, readRevision(payload))
     if (!saved.ok) return saveFailure(saved)

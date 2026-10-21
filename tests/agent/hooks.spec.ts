@@ -64,6 +64,11 @@ function makeSkills(options: {
   shadowed?: Set<string>
   /** 记录每次 `snapshot` 的实参，供用例断言生产调用点传了什么。 */
   verifyCalls?: Array<{ cwd?: string; scope?: unknown }>
+  /**
+   * 这些名字带**官方路径**（`.../@deepseek-ai/.../SKILL.md`）。
+   * 用来钉住「掩蔽集用全量清单」：官方行在展示口径下会被过滤，但求值时必须在场。
+   */
+  officialPaths?: readonly string[]
 }): SkillsServiceLike {
   return {
     snapshot: async (call: { cwd?: string; scope?: unknown }) => {
@@ -80,6 +85,11 @@ function makeSkills(options: {
           // 遮蔽**不删名字**，只把 `modelInvocable` 置 false（`dsh-skill` 的 `collect()`
           // 只按名字去重）。替身若让名字消失，就会放过「用名字存在性当判据」这类错误。
           invocation: { modelInvocable: !(readingAgentLayer && options.shadowed?.has(name) === true) },
+          // 官方行的路径形态（`@deepseek-ai` 作用域）必须与真实宿主一致，
+          // 否则「演示口径过滤」与「求值口径全量」的差异在替身里不可观测。
+          ...(options.officialPaths?.includes(name) === true
+            ? { path: `/home/user/.dsh/profiles/web/node_modules/@deepseek-ai/dsh-agent-preset/skills/${name}/SKILL.md` }
+            : {}),
         })),
         complete: options.complete ?? true,
       }
@@ -127,6 +137,8 @@ function makeHarness(options: {
   agentSkills?: string[]
   complete?: boolean
   toolNames?: string[]
+  /** 这些名字在清单里带官方路径（`@deepseek-ai` 作用域），见 `makeSkills`。 */
+  officialPaths?: readonly string[]
 } = {}) {
   const services: Record<string, unknown> = {}
   const agent = makeAgent('a1', '/proj', services)
@@ -160,6 +172,7 @@ function makeHarness(options: {
     hostScope: agent,
     shadowed,
     verifyCalls,
+    ...(options.officialPaths === undefined ? {} : { officialPaths: options.officialPaths }),
   })
   const skills = {
     snapshot: baseSkills.snapshot,
@@ -283,6 +296,31 @@ describe('installAgentHooks', () => {
     expect(harness.registerScopes).toContain(harness.states.get('a1')?.agent)
     // 没有 workspace 层的 mcp 关闭项 ⇒ 空 deny 不调 restrict（否则宿主抛 no-op）。
     expect(harness.restrictCalls).toEqual([])
+  })
+
+  it('derives the hidden set from the full inventory even with official skills hidden from the panel', async () => {
+    /*
+     * 展示开关只决定面板「列不列」，**不参与掩蔽求值**。
+     *
+     * 反例的后果是静默的：「打开开关 → 关掉一条官方 skill → 关掉开关」之后，清单里
+     * 没有那条名字了，掩蔽集随之丢掉它，官方 skill 会重新对模型可见——面板上看不出任何异常。
+     * 这条用例让策略关掉一条**官方路径**的 skill 且保持 `showOfficialSkills: false`，
+     * 断言它仍被 shadow。
+     */
+    const ctx = makeFakeCtx() as unknown as Context & FakeContext
+    const harness = makeHarness({
+      global: { mode: 'blacklist', skills: ['office-probe'], mcps: [], showOfficialSkills: false },
+      globalSkills: ['demo', 'office-probe'],
+      agentSkills: ['demo', 'office-probe'],
+      officialPaths: ['office-probe'],
+    })
+    installAgentHooks(ctx, harness.deps)
+    await fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })
+
+    expect(harness.shadowCalls).toContain('office-probe')
+    expect(harness.shadowed.has('office-probe')).toBe(true)
+    // demo 不在名单里，不应被误伤。
+    expect(harness.shadowCalls).not.toContain('demo')
   })
 
   it('re-grounds to the saved policy on skills/change and re-derives the hidden set', async () => {

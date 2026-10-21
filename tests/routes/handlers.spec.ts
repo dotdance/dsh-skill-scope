@@ -896,7 +896,12 @@ describe('registerRoutes', () => {
         'also-kept',
       ])
       // 两份策略都要给全：客户端靠它们算「这一行是否与全局不同」。
-      expect(out.value.global).toEqual({ mode: 'blacklist', skills: ['closed-globally'], mcps: [] })
+      expect(out.value.global).toEqual({
+        mode: 'blacklist',
+        skills: ['closed-globally'],
+        mcps: [],
+        showOfficialSkills: false,
+      })
       expect(out.value.workspace).toEqual(EMPTY_WORKSPACE_POLICY)
       // 旧字段已删除。留着它们会让客户端继续按「被摘掉」的假设渲染。
       expect(out.value).not.toHaveProperty('disabledGlobally')
@@ -997,5 +1002,133 @@ describe('registerRoutes', () => {
       if (!out.ok) throw new Error('expected ok')
       expect(out.value.inventory.skills.map((row) => row.name)).toEqual(['in-global', 'injected-only'])
     })
+  })
+})
+
+/**
+ * 官方 skill 的**展示开关**（`showOfficialSkills`）。
+ *
+ * 两条路由用同一个值：开关存在全局策略里，所以「全局面板显示什么」与「工作区面板
+ * 显示什么」永远同口径。这里钉住四件事：
+ * - 缺省（关）时官方行不出来，且不是「被关掉」，只是不列；
+ * - 打开后官方行按普通行出现；
+ * - 打开只改展示，不改任何名字的开/关（策略名单不变）；
+ * - 工作区路由跟随全局开关（不是各自读一次）。
+ */
+describe('official skills display switch', () => {
+  /** 官方 preset skill 的真实路径形态（含 `@deepseek-ai` 作用域）。 */
+  const OFFICIAL_PATH = '/home/user/.dsh/profiles/web/node_modules/@deepseek-ai/dsh-agent-preset/skills/agent-experience/SKILL.md'
+  const OFFICIAL = { name: 'agent-experience', path: OFFICIAL_PATH }
+  const OWN = { name: 'academic-verify', path: '/home/user/proj/sand/skills/academic-verify/SKILL.md' }
+
+  it('hides official rows by default and keeps the policy list untouched', async () => {
+    const { deps } = makeDeps({ skills: [OFFICIAL, OWN] })
+    const out = await handleGlobal({}, deps)
+    if (!out.ok) throw new Error('expected ok')
+    expect(out.value.inventory.skills.map((row) => row.name)).toEqual(['academic-verify'])
+    expect(out.value.policy.skills).toEqual([])
+    expect(out.value.policy.showOfficialSkills).toBe(false)
+  })
+
+  it('lists official rows after the switch is saved, without closing anything', async () => {
+    const { deps } = makeDeps({ skills: [OFFICIAL, OWN] })
+    const saved = await handleGlobalSave(
+      { mode: 'blacklist', skills: [], mcps: [], showOfficialSkills: true, revision: null },
+      deps,
+    )
+    if (!saved.ok) throw new Error('expected ok')
+    expect(saved.value.policy.showOfficialSkills).toBe(true)
+    expect(saved.value.policy.skills).toEqual([])
+    const out = await handleGlobal({}, deps)
+    if (!out.ok) throw new Error('expected ok')
+    expect(out.value.inventory.skills.map((row) => row.name)).toEqual(['agent-experience', 'academic-verify'])
+  })
+
+  it('lets the workspace save flip the global switch without touching the global lists', async () => {
+    /*
+     * 工作区面板也展示这个**全局**开关（用户要求）。它随 `workspace/save` 提交：
+     * 服务端只改全局文件里的 `showOfficialSkills`，全局名单按磁盘现值保留——
+     * 因为工作区面板没有全局 revision，回写旧名单会覆盖别人刚改的名单。
+     */
+    const cwd = await makeRealCwd()
+    const agent = makeAgent('session-live', cwd)
+    const { deps, files } = makeDeps({ agent, skills: [OFFICIAL, OWN] })
+
+    // 先造一份「全局关掉了一项」的策略，作为「名单必须保留」的对照物。
+    const first = await handleGlobalSave(
+      { mode: 'blacklist', skills: ['academic-verify'], mcps: [], showOfficialSkills: false, revision: null },
+      deps,
+    )
+    if (!first.ok) throw new Error('expected ok')
+
+    const saved = await handleWorkspaceSave(
+      { sessionId: 'session-live', workspace: {}, showOfficialSkills: true, revision: null },
+      deps,
+    )
+    if (!saved.ok) throw new Error('expected ok')
+    // 全局名单逐字保留，只有展示开关变了。
+    expect(JSON.parse(files.get(globalPolicyPath())!)).toEqual({
+      mode: 'blacklist',
+      skills: ['academic-verify'],
+      mcps: [],
+      showOfficialSkills: true,
+    })
+    // 回读的视图也换了口径：官方行出现在清单里。
+    expect(saved.value.global.showOfficialSkills).toBe(true)
+    expect(saved.value.inventory.skills.map((row) => row.name)).toEqual(['agent-experience', 'academic-verify'])
+  })
+
+  it('rejects a non-boolean display switch on the workspace save', async () => {
+    const cwd = await makeRealCwd()
+    const agent = makeAgent('session-live', cwd)
+    const { deps } = makeDeps({ agent })
+    const out = await handleWorkspaceSave(
+      { sessionId: 'session-live', workspace: {}, showOfficialSkills: 'yes' },
+      deps,
+    )
+    expect(out.ok).toBe(false)
+    if (!out.ok) expect(out.error.code).toBe('bad-request')
+  })
+
+  it('groups path-less official provider rows by provider instead of runtime-injected', async () => {
+    /*
+     * `dsh-office` 的 7 条 `office-*` 没有 `path`（只有 provider 自用的 `locator`/`resourceBase`）。
+     * 旧分组把它们塞进「运行时注入」，与行详情里的「来源：dsh-office」矛盾。
+     * 这里走真实路由，钉住「组名 = provider 名」这个用户可见结果。
+     */
+    const { deps } = makeDeps({ skills: [{ name: 'office-docx', provider: 'dsh-office' }] })
+    // 官方行默认不展示：先打开展示开关。
+    const saved = await handleGlobalSave(
+      { mode: 'blacklist', skills: [], mcps: [], showOfficialSkills: true, revision: null },
+      deps,
+    )
+    if (!saved.ok) throw new Error('expected ok')
+    const row = saved.value.inventory.skills[0]
+    expect(row?.name).toBe('office-docx')
+    expect(row?.group).toBe('provider:dsh-office')
+    expect(row?.groupLabel).toBe('dsh-office')
+    expect(row?.sourceLabel).toBe('dsh-office')
+    // 与「运行时注入」组区分开（前端对空 groupLabel 才会渲染那句文案）。
+    expect(row?.groupLabel).not.toBe('')
+  })
+
+  it('makes the workspace inventory follow the global switch', async () => {
+    const cwd = await makeRealCwd()
+    const agent = makeAgent('session-live', cwd)
+    const { deps } = makeDeps({ agent, skills: [OFFICIAL, OWN] })
+
+    const before = await handleWorkspace({ sessionId: 'session-live' }, deps)
+    if (!before.ok) throw new Error('expected ok')
+    expect(before.value.inventory.skills.map((row) => row.name)).toEqual(['academic-verify'])
+
+    const saved = await handleGlobalSave(
+      { mode: 'blacklist', skills: [], mcps: [], showOfficialSkills: true, revision: null },
+      deps,
+    )
+    if (!saved.ok) throw new Error('expected ok')
+
+    const after = await handleWorkspace({ sessionId: 'session-live' }, deps)
+    if (!after.ok) throw new Error('expected ok')
+    expect(after.value.inventory.skills.map((row) => row.name)).toEqual(['agent-experience', 'academic-verify'])
   })
 })

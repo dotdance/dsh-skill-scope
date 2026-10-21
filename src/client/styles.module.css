@@ -652,6 +652,33 @@
   opacity: 0.5;
 }
 
+/*
+ * 视图条右端的附加控件（官方 skill 展示开关）。`margin-left: auto` 把它推到同一行的
+ * 右端；容器变窄时整行 `flex-wrap` 已经开了，它会自然落到下一行，不挤压视图按钮。
+ */
+.modeRowTrailing {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+}
+
+/*
+ * 官方 skill 展示开关那一行。开关本体与列表行共用 `.switch`，这里只负责
+ * 「开关 + 文案」的横向排布；文案用次要色，避免与标题抢注意力。
+ */
+.toggleRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary, currentColor);
+}
+
+.toggleLabel {
+  cursor: default;
+  user-select: none;
+}
+
 .button {
   padding: 4px 10px;
   border: 1px solid var(--dsw-alias-border-l2, currentColor);
