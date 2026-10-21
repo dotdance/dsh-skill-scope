@@ -223,6 +223,23 @@ export const UNGROUPED_KEY = '\u0000ungrouped'
 const PROVIDER_GROUP_PREFIX = 'provider:'
 
 /**
+ * 把路径统一成以 `/` 分隔的形态（反斜杠 → `/`）。
+ *
+ * **为什么需要且只需要这一处**：宿主在 Windows 上给出的 `path` 是反斜杠原生形态
+ * （`dsh-fs-local` 的 `realpath.native` / `resolve` 结果），而 `dsh-skill` 原样透传、
+ * 不做任何规范化（`dsh-skill/lib/index.js:491-503`）。本模块其余逻辑一律按 `/` 切分，
+ * 若不在入口统一，反斜杠路径只有一段：找不到 `skills` 级、兜底又 `slice(0,-1)` 成空串，
+ * 所有磁盘 skill 会并进同一个空 key 组，来源也变成空白（Windows 用户实测现象）。
+ *
+ * 只换分隔符，不动大小写、盘符与 UNC 前导 `//`：本模块只需要「能切分」。
+ * 与宿主前端 `dsh-util-workspace-path` 的 `sessionFileAddress` 同一口径
+ * （`path.replace(/\\/g, '/')`），因此「来源」里的路径与 DSH 自身显示一致。
+ */
+function toPosixPath(path: string): string {
+  return path.replace(/\\/g, '/')
+}
+
+/**
  * 从一个 skill 路径算出它的**注册根目录**（分组 key）。
  *
  * **规则：向上找最近的名为 `skills` 的目录。**
@@ -245,7 +262,7 @@ export function groupKeyOf(row: SkillRow): string {
     }
     return UNGROUPED_KEY
   }
-  const parts = row.path.split('/')
+  const parts = toPosixPath(row.path).split('/')
   for (let i = parts.length - 2; i >= 0; i--) {
     if (parts[i] === 'skills') return parts.slice(0, i + 1).join('/')
   }
@@ -274,7 +291,7 @@ export function groupKeyOf(row: SkillRow): string {
 export function groupLabelOf(key: string): string {
   if (key === UNGROUPED_KEY) return ''
   if (key.startsWith(PROVIDER_GROUP_PREFIX)) return key.slice(PROVIDER_GROUP_PREFIX.length)
-  const parts = key.split('/')
+  const parts = toPosixPath(key).split('/')
   // `node_modules/<包名>/skills` → 取第 3 段。
   const nodeModulesAt = parts.lastIndexOf('node_modules')
   if (nodeModulesAt >= 0 && nodeModulesAt + 1 < parts.length) {

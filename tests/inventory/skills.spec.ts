@@ -243,6 +243,25 @@ describe('groupKeyOf', () => {
     expect(groupKeyOf(row({ name: 'x', path: '/opt/myskills/x' }))).toBe('/opt/myskills')
   })
 
+  it('treats a Windows path spelled with backslashes like the same path spelled with `/`', () => {
+    /*
+     * 实测事实：Windows 上宿主给出的 `path` 是反斜杠原生形态（`dsh-fs-local` 的
+     * `realpath.native` / `resolve` 结果），而 `dsh-skill` 原样透传、不做规范化
+     * （`dsh-skill/lib/index.js:491-503`）。本模块其余逻辑一律按 `/` 切分，因此必须在
+     * 入口统一 —— 否则整个路径只有一段：循环找不到 `skills` 级、兜底又 `slice(0,-1)`
+     * 成空串，所有磁盘 skill 会并进同一个空 key 组（Windows 用户实测现象）。
+     */
+    expect(groupKeyOf(row({ name: 'x', path: 'C:\\Users\\me\\.agents\\skills\\x' }))).toBe(
+      'C:/Users/me/.agents/skills',
+    )
+    // 同一条路径的正斜杠拼写必须给出**同一个 key**（同一台机器上两种拼写混用时不分裂成两组）。
+    expect(groupKeyOf(row({ name: 'x', path: 'C:/Users/me/.agents/skills/x' }))).toBe('C:/Users/me/.agents/skills')
+    // UNC 共享路径：前导双斜杠要保住（还原成正斜杠后是 `//server/...`）。
+    expect(groupKeyOf(row({ name: 'y', path: '\\\\server\\share\\skills\\y' }))).toBe('//server/share/skills')
+    // 「没有 `skills` 这一级」的兜底同样要跨分隔符成立。
+    expect(groupKeyOf(row({ name: 'z', path: 'C:\\Users\\me\\myskills\\z' }))).toBe('C:/Users/me/myskills')
+  })
+
   it('returns the sentinel for a row without a path', () => {
     expect(groupKeyOf(row({ name: 'browser-skill' }))).toBe(UNGROUPED_KEY)
   })
@@ -287,6 +306,12 @@ describe('groupLabelOf', () => {
   it('names a folder group after its basename', () => {
     expect(groupLabelOf('/home/user/node_modules/gbrain/skills')).toBe('gbrain')
     expect(groupLabelOf('/home/user/proj/sand/skills')).toBe('sand')
+  })
+
+  it('reads a key that still carries Windows backslashes', () => {
+    // `groupKeyOf` 已统一成正斜杠；这里再兜一层，防止调用方直接把宿主原生路径当 key 传进来。
+    expect(groupLabelOf('C:\\Users\\me\\.agents\\skills')).toBe('.agents')
+    expect(groupLabelOf('C:\\Users\\me\\node_modules\\gbrain\\skills')).toBe('gbrain')
   })
 
   it('steps up one level when the basename is `skills` itself', () => {
@@ -355,6 +380,17 @@ describe('sourceLabelOf', () => {
         row({ name: 'academic-verify', provider: 'filesystem', path: '/home/user/node_modules/gbrain/skills/academic-verify' }),
       ),
     ).toBe('/home/user/node_modules/gbrain/skills')
+  })
+
+  it('normalizes a Windows path to `/`, so the origin reads the same everywhere', () => {
+    /*
+     * 「来源」直接复用分组 key（注册根），因此它与其他面板显示的是同一种拼写。
+     * 统一成正斜杠与 DSH 自己的资源地址规范一致
+     * （`dsh-util-workspace-path` 的 `sessionFileAddress` 会把反斜杠换成 `/`）。
+     */
+    expect(
+      sourceLabelOf(row({ name: 'x', provider: 'filesystem', path: 'C:\\Users\\me\\.agents\\skills\\x' })),
+    ).toBe('C:/Users/me/.agents/skills')
   })
 
   it('gives every skill under one filesystem root the same source label', () => {
