@@ -1,6 +1,6 @@
 {
   "name": "@dotdance/dsh-skill-scope",
-  "version": "0.3.0-alpha.2",
+  "version": "0.3.0-alpha.3",
   "description": "Skill and MCP visibility manager for DeepSeek Harness: the global layer sets a default, and each workspace can override any name both ways, with a sidebar panel and an input-card entry.",
   "type": "module",
   "main": "lib/index.js",
