@@ -9,7 +9,7 @@
 [![DSH ≥0.2.0-rc.2 <0.3.0](https://img.shields.io/badge/DSH-%E2%89%A5%200.2.0--rc.2%20%3C0.3.0-2563eb.svg)](#安装)
 ![node](https://img.shields.io/badge/node-%5E22.19.0%20%7C%7C%20%3E%3D24-3c873a.svg)
 
-**全局 + 项目粒度 skill/mcp 一键启停**
+**给你的 Agent 减负：Skill 与 MCP 一键启停，让上下文只装这一轮真正要用的能力。关掉的 skill / MCP 不再进入模型上下文，更干净，更省 token。**
 
 [English](README.en.md) · **简体中文**
 </div>
@@ -23,9 +23,6 @@ dsh plugin --profile web add @dotdance/dsh-skill-scope
 ```
 
 `--profile web` 换成你自己的 profile 名即可。
-
-要求 DSH `≥0.2.0-rc.2` 且 `<0.3.0`（更早的宿主不认 `engines.dsh`，会被判为不兼容）。
-
 
 ## 它解决什么问题
 

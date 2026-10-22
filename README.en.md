@@ -9,7 +9,7 @@
 [![DSH ≥0.2.0-rc.2 <0.3.0](https://img.shields.io/badge/DSH-%E2%89%A5%200.2.0--rc.2%20%3C0.3.0-2563eb.svg)](#installation)
 ![node](https://img.shields.io/badge/node-%5E22.19.0%20%7C%7C%20%3E%3D24-3c873a.svg)
 
-**One-click toggles for skills and MCP at both global and project scope**
+**Lighten the load on your agent: one-click toggles for skills and MCP, so the context holds only what this turn actually needs. Skills and MCP servers you switch off are no longer injected into the model context — cleaner, and lighter on tokens.**
 
 **English** · [简体中文](README.md)
 </div>
@@ -23,9 +23,6 @@ dsh plugin --profile web add @dotdance/dsh-skill-scope
 ```
 
 Replace `--profile web` with the name of your own profile.
-
-Requires DSH `≥0.2.0-rc.2` and `<0.3.0` (older hosts do not read `engines.dsh` and judge the plugin incompatible).
-
 
 ## The problem it solves
 
