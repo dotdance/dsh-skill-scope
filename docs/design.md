@@ -1,8 +1,8 @@
 # dsh-skill-scope 设计文档
 
-- 文档版本：v1.7
-- 日期：2026-10-12（v1.7 修订于 2026-10-13）
-- 基准：DSH `0.2.1-alpha.2`（`@deepseek-ai/cordis` `4.0.5-alpha.1`）
+- 文档版本：v2.1
+- 日期：2026-10-12（v2.1 修订于 2026-10-22）
+- 基准：DSH `0.2.1-rc.2`（`@deepseek-ai/cordis` `4.0.5`）；声明兼容下限 `0.2.0-rc.2`（见 13.11）
 - 目标仓库：本仓库（相对路径 `.`）
 - 状态：设计方向已与用户确认；本文件是实施计划的输入。实现已完成，当前代码以本文件的机制与不变量为准。
 - 修订历史见 13 节。本节只记录**当前**口径，不再复述各版本的编辑过程。
@@ -497,8 +497,8 @@ isOpen(name) = 工程层表里有 name ? 表里的值 : 全局是否启用(name)
 | 包名 | `dsh-skill-scope`（与仓库同名） |
 | 许可 | MIT |
 | 模块形态 | `type: "module"`，`exports`: `.` → `lib/index.js`，`./client` → `lib/client.js` |
-| engines | `node: "^22.19.0 || >=24.0.0"`；`dsh: ">=0.2.0-rc.2"`（见 13.8 与 13.9：v1.7 那条「engines.dsh 无消费者」的结论已被源码证伪；区间在 v1.9 放宽） |
-| 兼容性 | **`engines.dsh`（本版本起采用）** 与 **`peerDependencies` 里的 `@deepseek-ai/dsh-*` 区间**都是被消费的机制，由 `dsh-app-boot` 的 `evaluatePluginCompatibility` 判定。**二者不是并存关系：一旦声明 `engines.dsh`，它单独决定，`peerDependencies` 里的 dsh 项被完全忽略**（`dsh-app-boot/README.md:52`：「When the manifest declares `engines.dsh`, that range alone decides and `peerDependencies` are ignored.」）。`peerDependencies` 里**非 dsh 的项**（`@deepseek-ai/cordis`、`react`）不受影响，仍照常生效。不存在的 `dsh.engines.dsh` / `dsh.compatibility.dshReleases` 仍不采用。 |
+| engines | `node: "^22.19.0 || >=24.0.0"`；`dsh: "^0.2.0-rc.2 || ^0.2.1-0"`（下限 `0.2.0-rc.2`、封顶 `<0.3.0`；v1.9 的裸 `>=` 已在 v2.1 纠正，见 13.11） |
+| 兼容性 | **`engines.dsh`（本版本起采用）** 与 **`peerDependencies` 里的 `@deepseek-ai/dsh-*` 区间**都是被消费的机制，由 `dsh-app-boot` 的 `evaluatePluginCompatibility` 判定。**二者不是并存关系：一旦声明 `engines.dsh`，它单独决定，`peerDependencies` 里的 dsh 项被完全忽略**（`dsh-app-boot/README.md:52`：「When the manifest declares `engines.dsh`, that range alone decides and `peerDependencies` are ignored.」）。`peerDependencies` 里**非 dsh 的项**（`@deepseek-ai/cordis`、`react`）不受影响，仍照常生效。**该机制自 `0.2.1-alpha.4` 起存在**：更早的 `dsh-app-boot` 里没有读 `engines` 的代码，那些宿主只按 `peerDependencies` 判定，所以两条声明必须用**同一区间**，否则会在旧宿主上被判不兼容（见 13.11）。不存在的 `dsh.engines.dsh` / `dsh.compatibility.dshReleases` 仍不采用。 |
 | bundle | `dsh.bundle.patch` → `./cordis.patch.yml`（`insert` 一行 `dsh-skill-scope`） |
 | client | `dsh.client = { platform: 'web', inject: [...包名图...], external: ['@deepseek-ai/dsh-client-ui-slots', '@deepseek-ai/dsh-client-ui-primitives', '@deepseek-ai/dsh-client-runtime/client'] }`（字段语义见 `@deepseek-ai/dsh-package-manifest/lib/types/types.d.ts:75-92`：`inject` 只是信息性包名依赖，**不是** cordis 服务注入；`external` 是「client baseline 之外的精确模块请求」，含 `<pkg>/client` 这类子路径，未声明即运行期失败） |
 | 不采用 | `dsh.dynamic`（那是某个插件开发回路的私有约定，官方 `dsh-client-modules` 不读，因此不是可用契约） |
@@ -1114,3 +1114,71 @@ v1.5~v1.9 期间工作区面板把全局关闭项整条摘除。它当时**是�
 - 新增不变量 27（求值公式唯一，服务端与客户端逐字同构）。
 - 3.6 的读取宽容口径补上工作区侧：单个值不是布尔 ⇒ 该项按「跟随全局」+ warning，不整份丢弃；
   `default` 与 `workspace` 并存 ⇒ 以 `workspace` 为准 + warning。
+
+---
+
+### 13.11 v2.1（2026-10-22：兼容区间封顶并对齐，纠正 13.9 的裸 `>=`）
+
+**背景**：用户问「版本依赖写作 DSH `>=0.2.0-rc.2` ∩ `^0.2.1-alpha.2`，这对吗」。结论是**不对**：
+这个「交集」只在部分宿主上成立，其余宿主各吃一头副作用（见一）。
+
+**一、13.9 的两条缺陷（源码 + 实测）**
+
+1. **放宽在 `0.2.0-rc.2` 上从未生效。** `engines.dsh` 是 `0.2.1-alpha.4` 起才被读取的机制
+   （`dsh-app-boot` 各版 `grep -c engines`：`0.2.0-rc.2` / `0.2.1-alpha.2` / `0.2.1-alpha.3` 均为 0，
+   `0.2.1-alpha.4` 为 9）。更早的宿主不读 `engines.dsh`，只按 `peerDependencies` 判定，而 13.8 保留的
+   peer `^0.2.1-alpha.2` 在 `0.2.0-rc.2` 上不满足 ⇒ `evaluatePluginCompatibility` 返回不兼容，
+   preflight 置 `row.disabled = true`。也就是说：**当时唯一可能被放宽命中的宿主，恰恰不认这条声明。**
+2. **裸 `>=` 没有上界 ⇒ `1.0.0` 也判兼容。** 本插件的职责是限制工具，若新大版本改了
+   `tools.restrict` 的语义，插件会「照常加载但限制没生效」——静默失效比被禁用更危险。
+
+**二、API 层核对（`0.2.0-rc.2` vs `0.2.1-alpha.2`）**
+
+`npm pack` 解包后逐包比对（产物在 `tmp/vcompat/`）：本插件用到的 `skills` / `tools` / `agents` /
+`slots` / `layout` / `locale` 服务名，`register` / `snapshot` / `get` / `restrict` / `view` /
+`schemas` / `selectPanel` / `register-bind` 签名，`agent/created`（serial）/ `agent/disposed` /
+`skills/change` / `tools/change` 事件，四个插槽 id 与 kind/scope，`createScope` / `scopeOf`，
+`writeFileAtomic` / `withFileLock`，`dshHomePath`，`SessionObservationReader.read`，`Tag`
+在 `0.2.0-rc.2` 中均已存在。据此「支持 `0.2.0-rc.2`」在 API 层成立。
+
+**三、改动**
+
+`engines.dsh`、5 个 `@deepseek-ai/dsh-*` peer、2 个 `@deepseek-ai/dsh-*` dependency 统一为：
+
+```
+^0.2.0-rc.2 || ^0.2.1-0
+```
+
+**为什么不是 `>=0.2.0-rc.2 <0.3.0-0`**：这条声明有**两个**消费者，判定语义不同 ——
+DSH 用 `semver.satisfies(…, { includePrerelease: true })`；npm/pnpm 用默认模式（预发布版本只有在
+其 `主.次.修` 三元组也带预发布号时才匹配）。`>=0.2.0-rc.2 <0.3.0-0` 在 npm 模式下会**拒掉
+`0.2.1-alpha.*` 与 `0.2.1-rc.*`**（实测：`pnpm install --frozen-lockfile` 报
+`version "0.2.1-alpha.2" doesn't satisfy range ">=0.2.0-rc.2 <0.3.0-0"`），在 DSH 模式下却放行。
+`^0.2.1-0` 的 `-0` 把 `0.2.1` 三元组的预发布纳入匹配，两个分句合起来在两个模式下结论一致：
+
+| 区间 | `0.2.0-rc.1` | `0.2.0-rc.2` | `0.2.0` | `0.2.1-alpha.*` | `0.2.1-rc.2` | `0.2.1` / `0.2.2` | `0.3.0-*` | `0.3.0` / `1.0.0` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `>=0.2.0-rc.2`（v1.9 现状） | NO | ok | ok | ok | ok | ok | ok | **ok** |
+| `>=0.2.0-rc.2 <0.3.0-0`（npm 视角） | NO | ok | ok | **NO** | **NO** | ok | NO | NO |
+| `^0.2.0-rc.2 \|\| ^0.2.1-0`（采用） | NO | ok | ok | ok | ok | ok | NO | NO |
+
+`dependencies` 一并写宽的依据：`dsh-atomic-write` 的 `lib/index.js` 在 rc.2 与 `0.2.1-alpha.2` 上
+md5 相同（`4814857a…`）；`dsh-home-paths` 两版有差异，但差异只新增了 `DSH_AGENTS_HOME` 一族函数与
+`resolveRoot` 抽层，本插件只用 `dshHomePath`，两版实现行为等价。且区间写宽**不改变实际解析结果**
+（仍取最高满足版本），只是让 8 处声明不再出现两种区间。
+
+**四、验证**（本机运行时 DSH `0.2.1-rc.2`）
+
+- 直接 import rc.2 的 `evaluatePluginCompatibility` 跑本 manifest：`0.2.0-rc.1`、`0.3.0-alpha.1`、
+  `0.3.0`、`1.0.0` 均 REJECTED；`0.2.0-rc.2` 起至 `0.2.2` 全部 accepted。
+- `pnpm install --frozen-lockfile` 通过；`pnpm peers check` → `No peer dependency issues found`；
+  开发树中 5 个 dsh 包统一在 `0.2.1-alpha.2`。
+- `pnpm run typecheck` / `pnpm run build` / `pnpm run test`（19 个文件、300 个测试）全过。
+
+**五、残余风险**
+
+- **未在 `0.2.0-rc.2` 上实跑**：本机只有 `0.2.1-rc.2`。API 比对通过，但 headless 降级路径、
+  以及 client 模块表（`lib/client.js` 依赖 `@deepseek-ai/dsh-client-ui-primitives`，而 `dsh.client.external`
+  未声明它）在 rc.2 的 shell 上能否装配，均未验证。真失败时用户可 `dsh plugin allow-version` 豁免，
+  或留在 `0.2.1.x`。
+- `cordis` peer 未改（`^4.0.5-alpha.1`）：`4.0.4` 与 `4.0.5-alpha.1` 的 `lib` 逐字节相同，收窄或放宽都无收益。

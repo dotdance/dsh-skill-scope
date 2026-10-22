@@ -6,7 +6,7 @@
 [![npm package](https://img.shields.io/npm/v/%40dotdance%2Fdsh-skill-scope.svg?label=npm%20package)](https://www.npmjs.com/package/@dotdance/dsh-skill-scope)
 [![npm 下载量](https://img.shields.io/npm/dt/%40dotdance%2Fdsh-skill-scope.svg?label=npm%20%E4%B8%8B%E8%BD%BD%E9%87%8F)](https://www.npmjs.com/package/@dotdance/dsh-skill-scope)
 [![DSH Web Plugin](https://img.shields.io/badge/DSH%20Web-Plugin-0f766e.svg)](https://github.com/dotdance/dsh-skill-scope)
-[![DSH >= 0.2.0-rc.2](https://img.shields.io/badge/DSH-%3E%3D%200.2.0--rc.2-2563eb.svg)](#安装)
+[![DSH ≥0.2.0-rc.2 <0.3.0](https://img.shields.io/badge/DSH-%E2%89%A5%200.2.0--rc.2%20%3C0.3.0-2563eb.svg)](#安装)
 ![node](https://img.shields.io/badge/node-%5E22.19.0%20%7C%7C%20%3E%3D24-3c873a.svg)
 
 **全局 + 项目粒度 skill/mcp 一键启停**
@@ -23,6 +23,8 @@ dsh plugin --profile web add @dotdance/dsh-skill-scope
 ```
 
 `--profile web` 换成你自己的 profile 名即可。
+
+要求 DSH `≥0.2.0-rc.2` 且 `<0.3.0`（更早的宿主不认 `engines.dsh`，会被判为不兼容）。
 
 
 ## 它解决什么问题

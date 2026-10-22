@@ -1,6 +1,6 @@
 {
   "name": "@dotdance/dsh-skill-scope",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Skill and MCP visibility manager for DeepSeek Harness: the global layer sets a default, and each workspace can override any name both ways, with a sidebar panel and an input-card entry.",
   "type": "module",
   "main": "lib/index.js",
@@ -15,7 +15,7 @@
   ],
   "engines": {
     "node": "^22.19.0 || >=24.0.0",
-    "dsh": ">=0.2.0-rc.2"
+    "dsh": "^0.2.0-rc.2 || ^0.2.1-0"
   },
   "scripts": {
     "build": "tsdown",
@@ -38,17 +38,17 @@
     "url": "git+https://github.com/dotdance/dsh-skill-scope.git"
   },
   "dependencies": {
-    "@deepseek-ai/dsh-atomic-write": "^0.2.1-alpha.2",
-    "@deepseek-ai/dsh-home-paths": "^0.2.1-alpha.2",
+    "@deepseek-ai/dsh-atomic-write": "^0.2.0-rc.2 || ^0.2.1-0",
+    "@deepseek-ai/dsh-home-paths": "^0.2.0-rc.2 || ^0.2.1-0",
     "zod": "^4.6.6"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.5-alpha.1",
-    "@deepseek-ai/dsh-agent": "^0.2.1-alpha.2",
-    "@deepseek-ai/dsh-client-connection": "^0.2.1-alpha.2",
-    "@deepseek-ai/dsh-host-webserver": "^0.2.1-alpha.2",
-    "@deepseek-ai/dsh-skill": "^0.2.1-alpha.2",
-    "@deepseek-ai/dsh-tools": "^0.2.1-alpha.2",
+    "@deepseek-ai/dsh-agent": "^0.2.0-rc.2 || ^0.2.1-0",
+    "@deepseek-ai/dsh-client-connection": "^0.2.0-rc.2 || ^0.2.1-0",
+    "@deepseek-ai/dsh-host-webserver": "^0.2.0-rc.2 || ^0.2.1-0",
+    "@deepseek-ai/dsh-skill": "^0.2.0-rc.2 || ^0.2.1-0",
+    "@deepseek-ai/dsh-tools": "^0.2.0-rc.2 || ^0.2.1-0",
     "react": "^18.2.0"
   },
   "devDependencies": {
