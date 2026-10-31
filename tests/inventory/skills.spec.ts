@@ -31,6 +31,7 @@ function fakeSkills(options: {
     source?: string
     provider?: string
     path?: string
+    resourceBase?: { path?: string }
     invocation?: { modelInvocable?: boolean }
   }>
 }): SkillsServiceLike & { calls: Array<{ cwd?: string; scope?: unknown }> } {
@@ -125,6 +126,22 @@ describe('official infrastructure skills are hidden by default', () => {
     const inventory = await readGlobalSkills(fake, { showOfficialSkills: false })
     // runtime 行必须保留：它是「用户要能单独关掉」的对象，不在官方白名单里。
     expect(inventory.rows.map((r) => r.name)).toEqual(['academic-verify', 'browser-skill'])
+  })
+
+  it('drops a path-less official row that proves itself by resource root (`dsh-badge`)', async () => {
+    const fake = fakeSkills({
+      rows: [
+        {
+          name: 'dsh-badge',
+          source: 'bundled',
+          provider: 'dsh-badge',
+          resourceBase: { path: '/g/node_modules/@deepseek-ai/dsh-skill-badge/assets' },
+        },
+        { name: 'academic-verify', source: 'custom', provider: 'filesystem', path: OWN },
+      ],
+    })
+    const inventory = await readGlobalSkills(fake, { showOfficialSkills: false })
+    expect(inventory.rows.map((r) => r.name)).toEqual(['academic-verify'])
   })
 
   it('leaves completeness untouched when hiding rows', async () => {

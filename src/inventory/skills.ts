@@ -63,6 +63,8 @@ export interface SkillsServiceLike {
       source?: string
       provider?: string
       path?: string
+      /** 官方判定的第二条信号：有些官方 provider 只给资源根、不给 `path`。 */
+      resourceBase?: { path?: string }
       invocation?: { modelInvocable?: boolean }
     }>
     complete: boolean
@@ -130,9 +132,9 @@ export async function readAgentSkills(
  * 滤掉官方 `@deepseek-ai` skill。
  *
  * 两个读函数都走这一行，所以全局层与工作区层**口径必然一致**——不会出现
- * 「全局视图藏了、工作区视图还在」这类分歧。判定与取舍见 `./official.ts`
- * （路径含 `@deepseek-ai`，或 provider 在官方白名单里——后者覆盖没有 `path` 的
- * `dsh-office` 那 7 条）。
+ * 「全局视图藏了、工作区视图还在」这类分歧。判定与取舍见 `./official.ts`：
+ * 路径或资源根含 `@deepseek-ai`，或 provider 在官方白名单里（覆盖既不给路径也不给
+ * 资源根的 `dsh-office` / `dsh-official-plugins` / `dsh-personalized-pages`）。
  *
  * **显示开关与掩蔽集是两件事，别合并**：面板用 `showOfficialSkills` 决定「列不列」，
  * 而 `src/agent/hooks.ts` 的掩蔽集合**永远**用全量清单（`showOfficialSkills: true`）。
@@ -150,6 +152,7 @@ function toRow(raw: {
   source?: string
   provider?: string
   path?: string
+  resourceBase?: { path?: string }
   invocation?: { modelInvocable?: boolean }
 }): SkillRow {
   return {

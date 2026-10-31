@@ -6,7 +6,7 @@
 [![npm package](https://img.shields.io/npm/v/%40dotdance%2Fdsh-skill-scope.svg?label=npm%20package)](https://www.npmjs.com/package/@dotdance/dsh-skill-scope)
 [![npm 下载量](https://img.shields.io/npm/dt/%40dotdance%2Fdsh-skill-scope.svg?label=npm%20%E4%B8%8B%E8%BD%BD%E9%87%8F)](https://www.npmjs.com/package/@dotdance/dsh-skill-scope)
 [![DSH Web Plugin](https://img.shields.io/badge/DSH%20Web-Plugin-0f766e.svg)](https://github.com/dotdance/dsh-skill-scope)
-[![DSH ≥0.2.0-rc.2 <0.3.0](https://img.shields.io/badge/DSH-%E2%89%A5%200.2.0--rc.2%20%3C0.3.0-2563eb.svg)](#安装)
+[![DSH 0.2.2 系列](https://img.shields.io/badge/DSH-0.2.2%20%E7%B3%BB%E5%88%97-2563eb.svg)](#安装)
 ![node](https://img.shields.io/badge/node-%5E22.19.0%20%7C%7C%20%3E%3D24-3c873a.svg)
 
 **给你的 Agent 减负：Skill 与 MCP 一键启停，让上下文只装这一轮真正要用的能力。关掉的 skill / MCP 不再进入模型上下文，更干净，更省 token。**

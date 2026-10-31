@@ -61,7 +61,7 @@ export interface SlotsFace {
 
 /** `layout` 面。`selectPanel` 只在目标 key **已注册**后调用（未注册的 key 会抛错）。 */
 export interface LayoutFace {
-  selectPanel(panelId: string): void
+  selectPanel(panelId: string | null): void
 }
 
 /** `locale` 面。`register` 返回 disposer；`bind` 给出取值器。 */

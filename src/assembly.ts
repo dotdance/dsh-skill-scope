@@ -98,7 +98,7 @@ export function readFetchRegister(ctx: AssemblyContext): FetchRegisterFace | nul
   const register = readFunction(fetchFace, 'register')
   if (register === null) return null
   return {
-    register: (spec) => register.call(fetchFace, spec) as () => unknown,
+    register: (spec) => register.call(fetchFace, spec) as () => Promise<void>,
   }
 }
 
@@ -176,7 +176,7 @@ export interface Assembly {
   store: PolicyStore
   states: AgentStates
   disposeHooks: () => void
-  disposeRoutes: () => void
+  disposeRoutes: () => Promise<void>
   /**
    * 「策略保存后对该会话立刻重新落地」入口（设计 `docs/design.md` §3.7「保存驱动」那条边）。
    *
@@ -267,7 +267,7 @@ export function assemble(ctx: AssemblyContext, deps: AssembleDeps = {}): Assembl
     reapplyAfterSave,
   }
 
-  let disposeRoutes: () => void = () => {}
+  let disposeRoutes: () => Promise<void> = async () => {}
   ctx.inject(['connection'], () => {
     const fetchRegister = readFetchRegister(ctx)
     if (fetchRegister === null) {

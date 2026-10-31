@@ -372,6 +372,96 @@ describe('installAgentHooks', () => {
     expect(harness.warn).toHaveBeenCalledWith(expect.stringContaining('incomplete'))
   })
 
+  it('coalesces external changes while an application is blocked and applies the latest inventory', async () => {
+    const ctx = makeFakeCtx() as unknown as Context & FakeContext
+    const harness = makeHarness({
+      workspace: { skills: { demo: false }, mcps: {} },
+      agentSkills: ['demo', 'other'],
+    })
+    const originalRegister = harness.deps.scoped.register
+    let releaseRegister!: () => void
+    let registerBlocked = true
+    let activeRegisters = 0
+    let maxActiveRegisters = 0
+    harness.deps.scoped.register = (definition: Record<string, unknown>, scopeAgent?: unknown) => {
+      activeRegisters += 1
+      maxActiveRegisters = Math.max(maxActiveRegisters, activeRegisters)
+      if (registerBlocked) {
+        void new Promise<void>((resolve) => {
+          releaseRegister = resolve
+        }).then(() => {
+          activeRegisters -= 1
+        })
+        return () => {}
+      }
+      try {
+        return originalRegister(definition, scopeAgent)
+      } finally {
+        activeRegisters -= 1
+      }
+    }
+    const baseSnapshot = harness.deps.skills.snapshot
+    let calls = 0
+    harness.deps.skills.snapshot = async (call: { cwd?: string; scope?: unknown }) => {
+      calls += 1
+      return await baseSnapshot(call)
+    }
+    installAgentHooks(ctx, harness.deps)
+    const created = fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })
+    await vi.waitFor(() => expect(releaseRegister).toBeTypeOf('function'))
+    registerBlocked = false
+    harness.state.workspace = { skills: { other: false }, mcps: {} }
+    const changed = fire(ctx, 'skills/change', {})
+    releaseRegister()
+    await Promise.all([created, changed])
+    expect(harness.states.get('a1')?.policy?.workspace).toEqual({ skills: { other: false }, mcps: {} })
+    expect(maxActiveRegisters).toBe(1)
+  })
+
+  it('does not register after disposal while a snapshot is blocked', async () => {
+    const ctx = makeFakeCtx() as unknown as Context & FakeContext
+    let releaseSnapshot!: () => void
+    const harness = makeHarness({
+      workspace: { skills: { demo: false }, mcps: {} },
+    })
+    const baseSnapshot = harness.deps.skills.snapshot
+    harness.deps.skills.snapshot = async (call: { cwd?: string; scope?: unknown }) => {
+      await new Promise<void>((resolve) => {
+        releaseSnapshot = resolve
+      })
+      return await baseSnapshot(call)
+    }
+    installAgentHooks(ctx, harness.deps)
+    const created = fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })
+    await vi.waitFor(() => expect(releaseSnapshot).toBeTypeOf('function'))
+    await fire(ctx, 'agent/disposed', harness.agent)
+    releaseSnapshot()
+    await created
+    expect(harness.shadowCalls).toEqual([])
+    expect(harness.states.get('a1')).toBeUndefined()
+  })
+
+  it('retries one incomplete snapshot and recovers after a later notification', async () => {
+    const ctx = makeFakeCtx() as unknown as Context & FakeContext
+    let complete = false
+    const verifyCalls: Array<{ cwd?: string; scope?: unknown }> = []
+    const harness = makeHarness({ agentSkills: ['demo'] })
+    const baseSnapshot = harness.deps.skills.snapshot
+    harness.deps.skills.snapshot = async (call: { cwd?: string; scope?: unknown }) => {
+      verifyCalls.push(call)
+      const result = await baseSnapshot(call)
+      return { ...result, complete }
+    }
+    installAgentHooks(ctx, harness.deps)
+    await fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })
+    expect(verifyCalls).toHaveLength(2)
+    expect(harness.shadowCalls).toEqual([])
+    complete = true
+    harness.state.workspace = { skills: { demo: false }, mcps: {} }
+    await fire(ctx, 'skills/change', {})
+    expect(verifyCalls.length).toBeGreaterThanOrEqual(3)
+    expect(harness.shadowCalls).toEqual(['demo'])
+  })
   it('never throws out of agent/created, so session creation cannot fail', async () => {
     const ctx = makeFakeCtx() as unknown as Context & FakeContext
     const harness = makeHarness()
@@ -384,6 +474,7 @@ describe('installAgentHooks', () => {
     ).resolves.toBeDefined()
     expect(ctx.warnings.join('\n')).toContain('agent/created')
   })
+
 
   it('releases shadows and restrictions on agent/disposed', async () => {
     const ctx = makeFakeCtx() as unknown as Context & FakeContext

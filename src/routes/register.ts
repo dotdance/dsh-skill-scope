@@ -29,7 +29,7 @@ export interface FetchRouteSpec {
 }
 
 export interface FetchRegisterFace {
-  register(spec: FetchRouteSpec): () => unknown
+  register(spec: FetchRouteSpec): () => void | Promise<void>
 }
 
 /** 我们自己拥有的四条路由（设计 6.2）。路径段来自 `src/shared/routes.ts`，这里补前导斜杠，
@@ -86,22 +86,26 @@ function wrap(handler: (body: unknown) => Promise<Envelope<unknown>>): (request:
 }
 
 /**
- * 注册四条精确路由，返回一个**同步** disposer 释放它们全部。
+ * 注册四条精确路由，返回一个**幂等的异步** disposer 释放它们全部。
  *
  * 每条路径只声明 `POST`：宿主的匹配是 `route.methods.has(request.method)`，
  * 不匹配时根本不进我们的 `fetch`，而是落到共享通道兜底并返回 `404 not found`
  * （`dsh-client-connection/lib/index.js:663-676`）。所以**不需要** `method-not-allowed` 错误码，
  * 也不该声明一个自己不支持的方法再去拒绝它（设计 6.2）。
  */
-export function registerRoutes(ctx: PluginContextLike, deps: RouteDeps, fetchRegister: FetchRegisterFace): () => void {
+export function registerRoutes(
+  ctx: PluginContextLike,
+  deps: RouteDeps,
+  fetchRegister: FetchRegisterFace,
+): () => Promise<void> {
   if (fetchRegister === undefined || fetchRegister === null) {
     // 未接入 connection（例如 dsh 以纯 host 方式启动）时静默跳过：路由是可选能力，
     // 不能因为拿不到注册面就让整个插件加载失败。
     ctx.logger.warn('dsh-skill-scope: 未提供 fetch 注册面，路由未注册')
-    return () => {}
+    return async () => {}
   }
 
-  const disposers: Array<() => unknown> = []
+  const disposers: Array<{ path: string; dispose: () => void | Promise<void> }> = []
   const specs: Array<{ path: string; handler: (body: unknown, deps: RouteDeps) => Promise<Envelope<unknown>> }> = [
     { path: ROUTES.global, handler: handleGlobal },
     { path: ROUTES.globalSave, handler: handleGlobalSave },
@@ -111,37 +115,34 @@ export function registerRoutes(ctx: PluginContextLike, deps: RouteDeps, fetchReg
 
   for (const { path, handler } of specs) {
     try {
-      disposers.push(
-        fetchRegister.register({
+      disposers.push({
+        path,
+        dispose: fetchRegister.register({
           path,
           methods: ['POST'],
           requestBody: 'buffered',
           fetch: wrap(async (body) => await handler(body, deps)),
         }),
-      )
+      })
     } catch (error) {
       ctx.logger.warn(`dsh-skill-scope: 注册路由失败（${path}）：${String(error)}`)
     }
   }
 
-  /** 释放一条路由；失败只 warn（成功路径与抛错路径的文案相同，故合成一处）。 */
-  const releaseOne = (dispose: () => unknown): void => {
-    const fail = (error: unknown): void => {
-      ctx.logger.warn(`dsh-skill-scope: 释放路由失败：${String(error)}`)
-    }
-    try {
-      // 真实 disposer 返回 Promise；这里不 await（disposer 契约是同步的），
-      // 但**必须**接住 rejection，否则一条失败的释放会变成 unhandled rejection。
-      const result = dispose()
-      if (result !== null && typeof result === 'object' && 'catch' in result) {
-        ;(result as Promise<unknown>).catch(fail)
-      }
-    } catch (error) {
-      fail(error)
-    }
-  }
-
-  return () => {
-    for (const dispose of disposers) releaseOne(dispose)
+  let cleanup: Promise<void> | null = null
+  return (): Promise<void> => {
+    if (cleanup !== null) return cleanup
+    cleanup = (async (): Promise<void> => {
+      await Promise.all(
+        disposers.map(async ({ path, dispose }) => {
+          try {
+            await dispose()
+          } catch (error) {
+            ctx.logger.warn(`dsh-skill-scope: 释放路由失败（${path}）：${String(error)}`)
+          }
+        }),
+      )
+    })()
+    return cleanup
   }
 }

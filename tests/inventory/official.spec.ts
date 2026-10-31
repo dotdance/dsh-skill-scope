@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isOfficialSkill, isOfficialSkillPath } from '../../src/inventory/official.ts'
+import { isOfficialResourceBase, isOfficialSkill, isOfficialSkillPath } from '../../src/inventory/official.ts'
 
 /**
  * 官方包在磁盘上的真实路径，取自 web profile 上的实测输出（2026-10-14），
@@ -126,5 +126,37 @@ describe('isOfficialSkill', () => {
 
   it('leaves a user’s filesystem skill visible', () => {
     expect(isOfficialSkill({ provider: 'filesystem', path: '/home/user/proj/sand/skills/mine/SKILL.md' })).toBe(false)
+  })
+
+  it('recognizes the official providers that ship no disk evidence at all', () => {
+    // `official-plugins` / `personalized-pages` 的 candidate 是 `locator: null`，只能按名字认。
+    expect(isOfficialSkill({ provider: 'dsh-official-plugins' })).toBe(true)
+    expect(isOfficialSkill({ provider: 'dsh-personalized-pages' })).toBe(true)
+  })
+
+  it('recognizes `dsh-badge` through its resource root, without a whitelist entry', () => {
+    expect(
+      isOfficialSkill({
+        provider: 'dsh-badge',
+        resourceBase: { path: '/g/node_modules/@deepseek-ai/dsh-skill-badge/assets' },
+      }),
+    ).toBe(true)
+  })
+})
+
+describe('isOfficialResourceBase', () => {
+  it('matches a resource root inside an official package', () => {
+    const base = '/g/node_modules/.pnpm/@deepseek-ai+dsh-skill-badge@0.2.2/node_modules/@deepseek-ai/dsh-skill-badge'
+    expect(isOfficialResourceBase({ path: `${base}/assets` })).toBe(true)
+    expect(isOfficialResourceBase(undefined)).toBe(false)
+  })
+
+  it('does not match a resource root outside the scope', () => {
+    // 桌面版 office 就是这样 ⇒ 它只能靠 provider 白名单认，不能删。
+    expect(
+      isOfficialResourceBase({
+        path: '/Applications/DeepSeek Harness.app/Contents/Resources/runtime/office-skills/office-docx',
+      }),
+    ).toBe(false)
   })
 })

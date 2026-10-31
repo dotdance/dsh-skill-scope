@@ -31,7 +31,7 @@ function hostServices(extra: Record<string, unknown> = {}): Record<string, unkno
 }
 
 /** 一个记录 `path` 的 connection.fetch 替身。 */
-function recordingConnection(registered: string[], dispose: () => void = () => {}): Record<string, unknown> {
+function recordingConnection(registered: string[], dispose: () => Promise<void> = async () => {}): Record<string, unknown> {
   return {
     fetch: {
       register: (spec: { path: string }) => {
@@ -58,13 +58,13 @@ describe('assemble：路由接线', () => {
     ])
   })
 
-  it('releases every route through disposeRoutes', () => {
+  it('releases every route through disposeRoutes', async () => {
     const registered: string[] = []
     const dispose = vi.fn()
     const ctx = makeFakeCtx(hostServices({ connection: recordingConnection(registered, dispose) }))
 
     const assembly = assemble(ctx as unknown as AssemblyContext)
-    expect(() => assembly.disposeRoutes()).not.toThrow()
+    await expect(assembly.disposeRoutes()).resolves.toBeUndefined()
 
     expect(dispose).toHaveBeenCalledTimes(4)
   })

@@ -176,6 +176,7 @@ async function applyRound(
   hidden: { skills: string[]; mcps: string[]; key: string },
   toolNames: readonly string[],
   knownServers: ReadonlySet<string>,
+  isActive: () => boolean = () => true,
 ): Promise<void> {
   const cwd = cwdOf(state.agent) ?? ''
   const chain = serial()
@@ -189,7 +190,10 @@ async function applyRound(
   if (skillKey !== state.skillKey) {
     const result = await applySkillShadow({
       skills: deps.skills as never,
-      scoped: deps.scoped,
+      scoped: {
+        // 异步定义读取结束前 Agent 可能已卸载；禁止后续注册产生残留。
+        register: (definition, agent) => isActive() ? deps.scoped.register(definition, agent) : () => {},
+      },
       cwd,
       agent: state.agent,
       hidden: hidden.skills,
@@ -204,12 +208,17 @@ async function applyRound(
       scopeOf: state.agent.raw ?? state.agent,
       ...(state.skillDispose === null ? {} : { previous: state.skillDispose }),
     })
+    if (!isActive()) {
+      releaseOne(deps, 'skill shadow', result.release)
+      return
+    }
     state.skillDispose = result.release
     state.skillKey = skillKey
   }
 
   // ── MCP 侧：隐藏的 server 名展开成可收窄工具名后比较 key。
   // `applyMcpRestriction` **不**接收 `serial`，所以这次必须由本层串行化。
+  if (!isActive()) return
   const restrictable = deps.tools.view(state.agent).restrictableNames
   // 与 `computeHidden` 同一个 `knownServers`（本函数由它算出隐藏集后调用），
   // 两边口径必须一致，否则会出现「隐藏集里有这个 server，却展开不出它的工具」。
@@ -225,6 +234,10 @@ async function applyRound(
         agent: state.agent,
       }),
     )
+    if (!isActive()) {
+      releaseOne(deps, 'mcp restriction', next?.release ?? null)
+      return
+    }
     state.mcpKey = mcpKey
     state.mcpDispose = next === null ? null : next.release
   }
@@ -293,28 +306,68 @@ export function installAgentHooks(
     return chain
   }
 
-  /**
-   * 本插件自己正在落地时置位；用来掐断**自反馈环**（见 `onChange` 的长注释）。
-   *
-   * 用计数而不是布尔：`regroundAndApply` 可能被嵌套触发（落地期间又收到一个
-   * 真正的外部 `skills/change`），计数能让最外层退出时才复位。
-   *
-   * **必须声明在 `onCreated` 之前**：`onCreated` 与 `onChange` 都要读写它，
-   * 而 `let` 在声明前是暂时性死区（TDZ），声明放后面会在首次 `agent/created`
-   * 抛 `Cannot access 'applying' before initialization`。
-   */
-  let applying = 0
+  interface ApplyState {
+    applying: boolean
+    pending: boolean
+    disposed: boolean
+  }
+  let stopped = false
+  const applyStates = new Map<string, ApplyState>()
+  const applyStateFor = (agentId: string): ApplyState => {
+    const existing = applyStates.get(agentId)
+    if (existing !== undefined) return existing
+    const created = { applying: false, pending: false, disposed: false }
+    applyStates.set(agentId, created)
+    return created
+  }
 
-  /** 一次完整的「重读策略 → 重算隐藏集 → 重新落地」，被两个触发源共用。 */
-  const regroundAndApply = async (state: AgentState): Promise<void> => {
-    const effective = await evaluate(deps, state.agent)
-    reground(state, effective)
-    const computed = await computeHidden(deps, state.agent, effective)
-    if (computed === null) return
-    await applyRound(deps, state, computed.hidden, computed.toolNames, computed.knownServers)
+  const drainAgent = async (state: AgentState, schedule: ApplyState, source: string): Promise<void> => {
+    if (schedule.disposed || schedule.applying || stopped) return
+    schedule.applying = true
+    const isActive = (): boolean => !stopped && !schedule.disposed
+    // 持续不完整的 provider 不得让 agent/created 永久挂起；一次有限重读后等后续通知。
+    let retriedIncomplete = false
+    try {
+      do {
+        schedule.pending = false
+        try {
+          await chainFor(state.agent.id)(async () => {
+            const effective = await evaluate(deps, state.agent)
+            if (!isActive()) return
+            const computed = await computeHidden(deps, state.agent, effective)
+            if (!isActive()) return
+            if (computed === null) {
+              if (!retriedIncomplete) {
+                retriedIncomplete = true
+                schedule.pending = true
+              }
+              return
+            }
+            reground(state, effective)
+            const previousSkillKey = state.skillKey
+            const previousMcpKey = state.mcpKey
+            await applyRound(deps, state, computed.hidden, computed.toolNames, computed.knownServers, isActive)
+            // 注册会改变宿主 revision。即使未收到通知，也在落地后重新读一次完整清单。
+            if (previousSkillKey !== state.skillKey || previousMcpKey !== state.mcpKey) schedule.pending = true
+          })
+        } catch (error) {
+          ctx.logger.warn(`dsh-skill-scope: ${source} 落地失败（agent=${state.agent.id}）：${String(error)}`)
+        }
+      } while (schedule.pending && isActive())
+    } finally {
+      schedule.applying = false
+    }
+  }
+
+  const requestAgentApply = (state: AgentState, source: string): Promise<void> => {
+    const applyState = applyStateFor(state.agent.id)
+    if (stopped || applyState.disposed) return Promise.resolve()
+    applyState.pending = true
+    return applyState.applying ? Promise.resolve() : drainAgent(state, applyState, source)
   }
 
   const onCreated = async (payload: AgentCreatedPayload): Promise<void> => {
+    if (stopped) return
     const agent = asAgentLike(payload?.agent)
     if (agent === null) {
       ctx.logger.warn('dsh-skill-scope: agent/created 负载形状不符，跳过落地')
@@ -325,109 +378,30 @@ export function installAgentHooks(
       return
     }
     const state = deps.states.ensure(agent)
-    // ── 自反馈环守卫同样要罩住 `agent/created` 这一路 ──
-    //
-    // 环是**每次 `scoped.register` 都闭合一次**的，所以 `agent/created` 里的
-    // 127 次注册同样会各触发一次 `onChange`。只在 `onChange` 里守卫**不够**：
-    // 那时 `applying` 还是 0（`onCreated` 没置位），重入照样成立。
-    // 因此这一路也必须置位，让 `onChange` 在落地期间整体静默。
-    applying += 1
-    try {
-      await chainFor(agent.id)(async () => {
-        await regroundAndApply(state)
-      })
-    } catch (error) {
-      // 绝不外抛：抛错会让会话创建失败（见函数注释）。
-      ctx.logger.warn(`dsh-skill-scope: agent/created 落地失败，本会话按空策略运行：${String(error)}`)
-    } finally {
-      applying -= 1
-    }
+    await requestAgentApply(state, 'agent/created')
   }
 
   const onDisposed = (value: unknown): void => {
     const agent = asAgentLike(value)
     if (agent === null) return
+    const applyState = applyStates.get(agent.id)
+    if (applyState !== undefined) {
+      applyState.disposed = true
+      applyState.pending = false
+    }
     const state = deps.states.get(agent.id)
     if (state === undefined) return
     releaseState(deps, state)
     deps.states.delete(agent.id)
     chains.delete(agent.id)
+    applyStates.delete(agent.id)
   }
 
-  /**
-   * 清单变化：对该会话重新求值并差分重算；只处理已有状态的 Agent。
-   *
-   * ## 为什么必须掐断自反馈环
-   *
-   * 本插件**监听** `skills/change`，同时它的遮蔽落地又**发出** `skills/change`：
-   *
-   * ```
-   * onChange → regroundAndApply → applyRound → applySkillShadow
-   *   → scoped.register()                       src/agent/skills.ts:88
-   *     → dsh-skill/lib/index.js:209  this.layers.effect(this.ctx, …, { label: "skills.register()" })
-   *       → dsh-scope/lib/index.js:189  effect(ctx, action, options)
-   *         → :191  const notify = options.notify ?? true     ← dsh-skill 没传，默认开
-   *         → :216  if (notify) this.onChange()
-   *           → SkillRegistry 构造时传入的失效回调            dsh-skill/lib/index.js:123
-   *             → invalidateCache() → notifyChange() → 派发 "skills/change"
-   *               → 回到本监听器
-   * ```
-   *
-   * 实测（probe1 / 3092，一次会话创建）：`onChange` 触发 **243** 次、
-   * `shadow` 注册 127 次、`onCreated` 耗时 **3576 ms**。其中 `applyRound` 只有
-   * **1** 次 `keyChanged=true`，其余 138 次都因 key 未变而空转——说明这一串爆发
-   * 全是环造成的，不是真的有清单变化。
-   *
-   * ## 环造成的两个用户可见症状
-   *
-   * 1. **新建会话卡顿**：`agent/created` 是 serial 派发，回调里跑完 127 次注册
-   *    （每次注册同步触发一次 `skills/change` 并重入）要 3.5 秒以上。
-   * 2. **第一条消息的 skill 目录整个消失**：`collect()`（`dsh-skill/lib/index.js:266-296`）
-   *    先记 `const revision = this.revision`，`await collectFresh()` 之后再比对；
-   *    不一致就重试，`MAX_COLLECT_ATTEMPTS = 2`（同文件 `:19`）用尽仍不一致时
-   *    返回 `cacheable: false` ⇒ `snapshot.complete = false`。而宿主
-   *    `dsh-tool-skill/lib/index.js:944` 对不完整快照的处理是
-   *    `if (!snapshot.complete) return decision;` —— **整块目录不注入**（全有或全无）。
-   *    注册风暴期间 revision 被本插件自己反复 +1，于是第一条消息恰好落在窗口内时，
-   *    模型拿到的就是「一个 skill 都没有」。
-   *
-   *    可控复现（8 秒窗口内每 5ms 快照一次）：
-   *    两轮分别得到 `incomplete=39/648` 与 `incomplete=76/80`。
-   *
-   * ## 修法
-   *
-   * 只做**重入守卫**，不改任何策略语义：本插件自己触发的落地不重入。
-   * *不*去改 `dsh-skill` 的 `register()` 传 `notify: false`——那是上游包的硬编码
-   * （`register` 只传 `{ label }`，没暴露 `notify`），不该由本插件越界修改。
-   *
-   * 守卫必须覆盖**整个** `regroundAndApply`：`applySkillShadow` 内部逐条
-   * `register`，环是在**每条注册**上闭合的，只在函数首尾开关挡不住中间的注册。
-   *
-   * 注意不能因此丢事件：真正的外部 `skills/change`（provider 上下线、文件增删）
-   * 若在落地期间到达，会被这一层丢弃。这是**有意的取舍**——落地本身结尾会重读
-   * 清单并差分（`applyRound` 按 key 比较），所以落地结束时状态已是最新；
-   * 而放行它只会再触发一轮同环。
-   */
   const onChange = async (): Promise<void> => {
-    if (applying > 0) {
-      return
-    }
-    applying += 1
-    try {
-      for (const agentId of deps.states.ids()) {
-        const state = deps.states.get(agentId)
-        if (state === undefined) continue
-        try {
-          await chainFor(agentId)(async () => {
-            await regroundAndApply(state)
-          })
-        } catch (error) {
-          ctx.logger.warn(`dsh-skill-scope: 清单变化后重新落地失败（agent=${agentId}）：${String(error)}`)
-        }
-      }
-    } finally {
-      applying -= 1
-    }
+    await Promise.all(deps.states.ids().flatMap((agentId) => {
+      const state = deps.states.get(agentId)
+      return state === undefined ? [] : [requestAgentApply(state, '清单变化后重新')]
+    }))
   }
 
   const offCreated = ctx.on('agent/created', onCreated as never)
@@ -450,6 +424,12 @@ export function installAgentHooks(
    * 每个退订各自 try/catch：一个失败不影响其余，也不影响 `chains.clear()`。
    */
   const stopAll = (): void => {
+    if (stopped) return
+    stopped = true
+    for (const schedule of applyStates.values()) {
+      schedule.disposed = true
+      schedule.pending = false
+    }
     for (const off of [offCreated, offDisposed, offSkills, offTools]) {
       try {
         off()
@@ -460,8 +440,10 @@ export function installAgentHooks(
     for (const agentId of deps.states.ids()) {
       const state = deps.states.get(agentId)
       if (state !== undefined) releaseState(deps, state)
+      deps.states.delete(agentId)
     }
     chains.clear()
+    applyStates.clear()
   }
 
   // `ctx.effect` 的契约是「回调返回释放函数」，所以传 `stopAll` 本身即可，

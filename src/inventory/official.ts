@@ -94,28 +94,53 @@ export function isOfficialSkillPath(path: string | undefined): boolean {
 }
 
 /**
- * 已确认的官方 provider：**官方包自己注册、不经磁盘 provider，因此没有 `path` 可判**。
+ * 已确认的官方 provider：**官方包自己注册、且既没有 `path`、资源根也不在作用域内**，
+ * 前两条按磁盘出处的信号都盖不住，只能按名字认。名单外的 provider 一律按第三方处理，
+ * 面板照常展示（判不出不加任何标记）。
  *
- * 目前只有 `dsh-office`（`@deepseek-ai/dsh-skill-office` 注册 7 条 `office-*`，实测
- * `provider='dsh-office'`、`source='bundled'`、`path` 缺失）。这是**白名单**：名单外的
- * provider 一律按第三方处理，面板照常展示。
+ * 三条（2026-10-30 实测 0.2.2-alpha.2）：`dsh-office`（桌面版把 `office-skills/` 放在
+ * app 资源目录，资源根不含作用域名）、`dsh-official-plugins`、`dsh-personalized-pages`
+ * （后两者 candidate 只有 `locator: null`）。
  *
  * `runtime` **不在**名单内：`browser-skill`、`memory-recall` 这类宿主内置能力必须留在
  * 面板上，用户要能单独关掉它们（见 `tests/routes/handlers.spec.ts` 的「活清单项」用例）。
  */
-const OFFICIAL_PROVIDERS: ReadonlySet<string> = new Set(['dsh-office'])
+const OFFICIAL_PROVIDERS: ReadonlySet<string> = new Set([
+  'dsh-office',
+  'dsh-official-plugins',
+  'dsh-personalized-pages',
+])
+
+/**
+ * 这一行的**资源根**是否落在官方作用域内。
+ *
+ * 有些官方 provider 只给 `resourceBase`（资源目录）、不给 `path`：`dsh-badge` 就是
+ * （`dsh-skill-badge/lib/index.js:10-39`，资源根恒在包目录内）。宿主 `toSummary` 会把
+ * `resourceBase` 透出（`dsh-skill/lib/index.js:490-502`），所以不必改 host。
+ */
+export function isOfficialResourceBase(resourceBase: { path?: string } | undefined): boolean {
+  const path = resourceBase?.path
+  if (path === undefined) return false
+  return path.includes(OFFICIAL_SCOPE)
+}
 
 /**
  * 这一行是否属于官方 `@deepseek-ai` skill（⇒ 面板不展示）。**清单过滤只调这一个。**
  *
  * 判定顺序（任一命中即官方）：
- * 1. `path` 任意位置含 `@deepseek-ai`（既有规则，覆盖有磁盘出处的官方包）；
- * 2. `provider` 在 `OFFICIAL_PROVIDERS` 白名单里（覆盖没有 `path` 的官方 provider）。
+ * 1. `path` 任意位置含 `@deepseek-ai`（覆盖有磁盘出处的官方包）；
+ * 2. `resourceBase.path` 含 `@deepseek-ai`（覆盖只给资源根的官方 provider）；
+ * 3. `provider` 在 `OFFICIAL_PROVIDERS` 白名单里（覆盖两条磁盘信号都没有的）。
  *
- * 两条都判不出时返回 `false`：**不能因为「判不出」就把它藏起来**，否则用户会失去
- * 自己技能/第三方插件技能的开关入口。
+ * 三条都判不出时返回 `false`：**不能因为「判不出」就把它藏起来**，否则用户会失去
+ * 自己技能/第三方插件技能的开关入口；判不出的行就按第三方展示，不加任何标记。
  */
-export function isOfficialSkill(entry: { path?: string; provider?: string }): boolean {
+export function isOfficialSkill(entry: {
+  path?: string
+  provider?: string
+  resourceBase?: { path?: string }
+}): boolean {
   if (isOfficialSkillPath(entry.path)) return true
+  if (isOfficialResourceBase(entry.resourceBase)) return true
   return entry.provider !== undefined && OFFICIAL_PROVIDERS.has(entry.provider)
 }
