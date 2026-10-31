@@ -484,6 +484,34 @@ describe('handleWorkspaceSave', () => {
     expect(reapplyCalls).toHaveLength(1)
   })
 
+  it('keeps the global display update when workspace persistence fails', async () => {
+    const agent = makeAgent('s1', cwd)
+    const { deps, files } = makeDeps({ agent })
+    const calls: string[] = []
+    const originalGlobal = deps.store.setGlobalShowOfficialSkills.bind(deps.store)
+    deps.store.setGlobalShowOfficialSkills = async (value) => {
+      calls.push('global')
+      return await originalGlobal(value)
+    }
+    deps.store.saveWorkspace = async () => {
+      calls.push('workspace')
+      throw new Error('workspace write failed')
+    }
+
+    const out = await handleWorkspaceSave(
+      { sessionId: 's1', workspace: { skills: {}, mcps: {} }, showOfficialSkills: true, revision: null },
+      deps,
+    )
+
+    expect(out).toMatchObject({
+      ok: false,
+      error: { code: 'internal', message: expect.stringContaining('workspace write failed') },
+    })
+    expect(calls).toEqual(['global', 'workspace'])
+    const globalFile = [...files.entries()].find(([path]) => path.endsWith('/global.json'))
+    expect(globalFile?.[1]).toContain('showOfficialSkills')
+    expect(await deps.store.loadWorkspace(cwd)).toMatchObject({ policy: EMPTY_WORKSPACE_POLICY, exists: false })
+  })
   it('does not reapply when the workspace save is rejected', async () => {
     const agent = makeAgent('s1', cwd)
     const { deps, reapplyCalls } = makeDeps({ agent })

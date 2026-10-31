@@ -418,6 +418,45 @@ describe('installAgentHooks', () => {
     expect(maxActiveRegisters).toBe(1)
   })
 
+  it('resolves a queued reapply request before the active drain completes, then converges', async () => {
+    const ctx = makeFakeCtx() as unknown as Context & FakeContext
+    const harness = makeHarness({ globalSkills: ['demo', 'other'], agentSkills: ['demo', 'other'] })
+    let releaseSnapshot!: () => void
+    let snapshotStarted!: () => void
+    const started = new Promise<void>((resolve) => { snapshotStarted = resolve })
+    const blocked = new Promise<void>((resolve) => { releaseSnapshot = resolve })
+    let snapshotCalls = 0
+    const baseSnapshot = harness.deps.skills.snapshot
+    harness.deps.skills.snapshot = async (call: { cwd?: string; scope?: unknown }) => {
+      snapshotCalls += 1
+      if (snapshotCalls === 1) {
+        snapshotStarted()
+        await blocked
+      }
+      return await baseSnapshot(call)
+    }
+    const hooks = installAgentHooks(ctx, harness.deps)
+    try {
+      let createdFinished = false
+      const created = fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })
+        .then(() => { createdFinished = true })
+      await started
+      harness.state.workspace = { skills: { other: false }, mcps: {} }
+      await expect(hooks.reapply()).resolves.toBeUndefined()
+      expect(createdFinished).toBe(false)
+      expect(snapshotCalls).toBe(1)
+      expect(harness.shadowCalls).toEqual([])
+      releaseSnapshot()
+      await created
+      expect(snapshotCalls).toBeGreaterThan(1)
+      expect(harness.shadowCalls).toEqual(['other'])
+      expect(harness.states.get('a1')?.policy?.workspace).toEqual({ skills: { other: false }, mcps: {} })
+    } finally {
+      releaseSnapshot()
+      hooks.stopAll()
+    }
+  })
+
   it('does not register after disposal while a snapshot is blocked', async () => {
     const ctx = makeFakeCtx() as unknown as Context & FakeContext
     let releaseSnapshot!: () => void

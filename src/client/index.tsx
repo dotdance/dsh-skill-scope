@@ -169,7 +169,7 @@ export function apply(ctx: ClientContextLike): void {
   // 弹层与 chip 一起注册：`shell.overlay` 是 root scope 的常驻浮动层，注册一次即可，
   // 开合只是它内部的一次重渲染，不需要反复注册/注销。
   // root scope **拿不到** `props.sessionId`（该标准面属会话作用域），
-  // 因此弹层的会话 id 由 chip 在渲染期写入下面的可变引用。
+  // 因此弹层的会话 id 由用户点击 chip 时绑定到下面的可变引用。
 
   // 开合状态放在闭包里，用订阅通知已注册的槽位重渲染（槽位注册只有一次）。
   let open = false
@@ -185,7 +185,7 @@ export function apply(ctx: ClientContextLike): void {
   }
   const readOpen = (): boolean => open
 
-  /** 会话 id 在渲染期由槽位标准 props 给出，注册期还没有；用可变引用承接。 */
+  /** 最近一次被点击的会话 id；不能在 chip 渲染时写入，否则多个会话会互相覆盖。 */
   let sessionId: string | undefined
 
   ctx.slots.inject('conversation.input.right', () =>
@@ -196,13 +196,13 @@ export function apply(ctx: ClientContextLike): void {
         order: 30,
       },
       ((props: { sessionId?: string; useSession?: UseSessionLike; useSyncExternalStore?: never }) => {
-        sessionId = props.sessionId
         return (
           <WorkspaceChip
             hasSession={typeof props.sessionId === 'string' && props.sessionId !== ''}
             t={t}
             {...(props.useSession === undefined ? {} : { useSession: props.useSession })}
             onOpen={() => {
+              sessionId = props.sessionId
               open = true
               notify()
             }}
