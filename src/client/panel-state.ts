@@ -64,9 +64,10 @@ export type PolicyPanelState<TValue> = {
   setQuery: (next: string) => void
   /**
    * `mutate` 收到当前值、返回**新策略**；`null` 表示「不改」（例如目标状态已达成时）。
-   * 与重构前两个面板的 `commit` 契约一致。
+   * 必须是纯函数，可能用于预览、保存及重放。返回值表示操作是否成功；
+   * 保存失败或被取消时返回 false，让调用方跳过成功后的刷新。
    */
-  commit: (mutate: (current: TValue) => TValue | null) => Promise<void>
+  commit: (mutate: (current: TValue) => TValue | null) => Promise<boolean>
   /** 翻转一个名字到**指定**目标状态（不是盲翻转，避免连点导致状态发散）。 */
   toggle: (name: string, next: boolean, which: Domain) => void
 }
@@ -74,8 +75,8 @@ export type PolicyPanelState<TValue> = {
 /**
  * 加载 + 三件改动操作。
  *
- * 回滚依赖**提交时刻捕获的快照**，不是 `value` 的闭包 —— 后者在连续快速点击时会拿到
- * 过期的值，回滚到更早的状态。提交串行化（`chain`），避免并发写入互相覆盖。
+ * 保存时从最近一次成功的服务端状态重算操作；成功后重放尚未发送的操作，
+ * 失败则取消本批剩余操作并回滚到最近确认的状态。
  */
 export function usePolicyPanel<TValue>({
   load,
@@ -90,6 +91,18 @@ export function usePolicyPanel<TValue>({
   const [view, setView] = useState<PolicyView>('all')
   const [query, setQuery] = useState('')
 
+  // 已确认的服务端状态与待保存操作队列。
+  const confirmed = useRef<TValue | null>(null)
+  const pending = useRef<Array<{
+    mutate: (current: TValue) => TValue | null
+    done: (success: boolean) => void
+  }>>([])
+  const running = useRef(false)
+  const refreshPending = useRef(false)
+  const saveFailed = useRef(false)
+  const generation = useRef(0)
+  const valueRef = useRef<TValue | null>(null)
+
   // 卸载后不再 setState；每次 refresh 递增以重新触发加载。
   const alive = useRef(true)
   const [nonce, setNonce] = useState(0)
@@ -101,16 +114,33 @@ export function usePolicyPanel<TValue>({
   )
 
   const refresh = useCallback(async (): Promise<void> => {
+    if (!alive.current) return
+    if (running.current) {
+      refreshPending.current = true
+      return
+    }
     setNonce((n) => n + 1)
   }, [])
 
   useEffect(() => {
+    if (running.current) {
+      refreshPending.current = true
+      return
+    }
     let current = true
+    const startedAt = generation.current
     setError(null)
     setLoadFailed(false)
     load().then(
       (loaded) => {
         if (current && alive.current) {
+          // 读取期间发生了保存：这份响应可能已过期，等队列清空后重新读。
+          if (startedAt !== generation.current) {
+            if (!saveFailed.current) void refresh()
+            return
+          }
+          confirmed.current = loaded
+          valueRef.current = loaded
           setValue(loaded)
           setLoadFailed(false)
         }
@@ -125,62 +155,69 @@ export function usePolicyPanel<TValue>({
     return () => {
       current = false
     }
-  }, [nonce, load])
+  }, [nonce, load, refresh])
 
-  // 提交串行化：并发 POST 会互相覆盖策略，且回滚快照会错位。
-  const chain = useRef<Promise<void>>(Promise.resolve())
-
-  /*
-   * `value` 的镜像 ref：`commit` 必须**同步**读到「当前这一刻」的值。
-   *
-   * 不能靠 `setValue(prev => …)` 的 updater 把结果写在闭包变量里再当场读取 ——
-   * React 18 起 updater 会被调度到渲染阶段执行，`setValue(...)` 返回时变量仍是初始值
-   * （`current === null`），于是 `commit` 直接 early-return：**开关点了没反应，
-   * 既不发保存请求、也不报错**。实测症状就是这个（保存调用数 0、`role="alert"` 不出现）。
-   *
-   * 每次渲染同步刷新镜像，`commit` 只读它。
-   */
-  const valueRef = useRef<TValue | null>(null)
-  valueRef.current = value
+  // 同步更新镜像，确保同一渲染周期内的连续操作也能累积。
+  const publish = useCallback((next: TValue): void => {
+    valueRef.current = next
+    if (alive.current) setValue(next)
+  }, [])
 
   const commit = useCallback(
-    async (mutate: (current: TValue) => TValue | null): Promise<void> => {
-      // 同步读镜像 ref（见上方 `valueRef` 注释：updater 里取值是错的）。
+    async (mutate: (current: TValue) => TValue | null): Promise<boolean> => {
       const current = valueRef.current
-      if (current === null) return
+      if (current === null || !alive.current) return false
       const next = mutate(current)
-      // 目标状态已达成：不改（返回 `null`），避免无谓写入。
-      if (next === null) return
-      setValue(next)
+      if (next === null) return true
+      generation.current++
+      publish(next)
       setBusy(true)
-      const snapshot: TValue = current
-      chain.current = chain.current
-        .then(() => save(snapshot, next))
-        .then(
-          (saved) => {
-            if (!alive.current) return
-            setValue((prev) =>
-              prev === null
-                ? prev
-                : mergeSaved === undefined
-                  ? saved
-                  : mergeSaved(prev, saved),
-            )
-            setError(null)
-          },
-          (cause: unknown) => {
-            if (!alive.current) return
-            // 回滚到**提交时刻**的快照，不是更早的某个值。
-            setValue(snapshot)
-            setError(describeError(cause))
-          },
-        )
-        .finally(() => {
-          if (alive.current) setBusy(false)
-        })
-      return chain.current
+      const completion = new Promise<boolean>((done) => pending.current.push({ mutate, done }))
+      if (!running.current) {
+        running.current = true
+        void (async () => {
+          try {
+            while (pending.current.length > 0) {
+              const operation = pending.current[0]
+              if (operation === undefined) break
+              const base = confirmed.current ?? current
+              const target = operation.mutate(base)
+              if (target !== null) {
+                const saved = await save(base, target)
+                confirmed.current = mergeSaved === undefined ? saved : mergeSaved(target, saved)
+              }
+              saveFailed.current = false
+              pending.current.shift()
+              operation.done(true)
+              // 服务端结果只更新确认状态，尚未发送的操作仍保留在界面上。
+              let preview = confirmed.current ?? base
+              for (const queued of pending.current) preview = queued.mutate(preview) ?? preview
+              publish(preview)
+              if (alive.current) setError(null)
+            }
+          } catch (cause: unknown) {
+            // 自动刷新不能清掉本批失败提示；后续由用户主动重载。
+            refreshPending.current = false
+            saveFailed.current = true
+            const cancelled = pending.current.splice(0)
+            publish(confirmed.current ?? current)
+            if (alive.current) setError(describeError(cause))
+            for (const operation of cancelled) operation.done(false)
+          } finally {
+            running.current = false
+            if (alive.current) {
+              setBusy(false)
+              if (refreshPending.current) {
+                refreshPending.current = false
+                setNonce((n) => n + 1)
+              }
+            }
+          }
+        })()
+      }
+      return completion
     },
-    [save, mergeSaved],
+    [save, mergeSaved, publish],
   )
 
   const toggle = useCallback(

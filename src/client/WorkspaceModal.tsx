@@ -164,7 +164,7 @@ export function WorkspaceModal(props: WorkspaceModalProps): ReactNode {
             ? null
             : { ...current, global: { ...current.global, showOfficialSkills: open } },
         )
-        .then(() => panel.refresh())
+        .then((saved) => { if (saved) return panel.refresh() })
     },
     [panel.commit, panel.refresh],
   )
