@@ -19,6 +19,17 @@ function makeDeps() {
 }
 
 describe('denyFor', () => {
+  it('uses the longest configured prefix without widening the deny list', () => {
+    const short = 'mcp__foo__lookup'
+    const long = 'mcp__foo__bar__lookup'
+    const own = 'mcp__foo__bar__own'
+    const names = [short, long, own]
+    const restrictable = new Set([short, long])
+    const known = new Set(['foo', 'foo__bar'])
+    expect(denyFor(names, restrictable, ['foo__bar'], known)).toEqual([long])
+    expect(denyFor(names, restrictable, ['foo'], known)).toEqual([short])
+  })
+
   it('expands server names into tool names and keeps only restrictable ones', () => {
     expect(
       denyFor(['mcp__gbrain__search', 'mcp__codegraph__x'], new Set(['mcp__gbrain__search']), ['gbrain', 'codegraph']),

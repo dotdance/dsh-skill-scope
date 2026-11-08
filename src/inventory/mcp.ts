@@ -21,7 +21,8 @@ import { MCP_SERVER_NAME_MAX } from '../policy/schema.ts'
  * 改为**最长前缀匹配**：这是设计 4.3 的要求。它的必要性在于 server 名允许下划线
  * （`MCP_NAME_RE` 的 `[A-Za-z0-9_-]`），所以 `mcp__` 之后「第一个 `__`」并不必然是
  * 边界——`server_na__me` 这种名字会让非贪婪正则切错。有已知集合时不需要猜：
- * 逐个比对哪个已知名真的是该工具名的前缀，取**最长**的那个。
+ * 从工具名末尾向前检查每个 `__` 边界，用已知集合查找候选名，首个命中就是最长前缀。
+ * 检查次数取决于工具名中的分隔符数量，不随已知服务器数量增加。
  *
  * 没有已知集合（或集合里没有命中项）时退化为非贪婪启发式，即设计 4.3 说的
  * 「只有遇到未知 server 时才退化」。退化是**有损**的，所以调用方应当把这种情形
@@ -30,13 +31,15 @@ import { MCP_SERVER_NAME_MAX } from '../policy/schema.ts'
 export function serverNameOf(toolName: string, knownServers?: ReadonlySet<string>): string | null {
   if (!toolName.startsWith(MCP_PREFIX)) return null
   if (knownServers !== undefined) {
-    let best: string | null = null
-    for (const server of knownServers) {
-      // 必须是 `mcp__<server>__` 整段前缀：只比 `server` 会让 `foo` 命中 `foobar` 的工具名。
-      if (!toolName.startsWith(`${MCP_PREFIX}${server}__`)) continue
-      if (best === null || server.length > best.length) best = server
+    for (
+      let boundary = toolName.lastIndexOf('__');
+      boundary >= MCP_PREFIX.length;
+      boundary = toolName.lastIndexOf('__', boundary - 1)
+    ) {
+      // 逐字符后退以保留重叠的 `__`；从长到短检查完整的 server 边界。
+      const server = toolName.slice(MCP_PREFIX.length, boundary)
+      if (knownServers.has(server)) return server
     }
-    if (best !== null) return best
   }
   const matched = HEURISTIC_SERVER.exec(toolName)
   const server = matched?.[1]

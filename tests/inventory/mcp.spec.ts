@@ -1,7 +1,21 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { classifyMcp, serverNameOf } from '../../src/inventory/mcp.ts'
 
 describe('serverNameOf', () => {
+  it.each([
+    ['mcp__foo__bar__lookup', 'foo__bar', 2],
+    ['mcp__unknown__nested__lookup', 'unknown', 2],
+  ])('bounds known-set work by name boundaries for %s', (tool, want, maxLookups) => {
+    // Catch reintroducing a scan over every unrelated configured server.
+    const known = new Set([...Array.from({ length: 512 }, (_, i) => `unrelated_${i}`), 'foo__bar'])
+    const iterator = vi.spyOn(known, Symbol.iterator)
+    const has = vi.spyOn(known, 'has')
+    expect(serverNameOf(tool, known)).toBe(want)
+    expect(iterator).not.toHaveBeenCalled()
+    expect(has.mock.calls.length).toBeGreaterThan(0)
+    expect(has.mock.calls.length).toBeLessThanOrEqual(maxLookups)
+  })
+
   it('takes the server name after the mcp__ prefix, not the text before the first __', () => {
     expect(serverNameOf('mcp__gbrain__search')).toBe('gbrain')
     // 工具名本身含 `__`，所以 must 取「紧跟 mcp__ 之后的那一段」，而非第一个 `__` 之前。
@@ -38,6 +52,23 @@ describe('serverNameOf', () => {
     expect(serverNameOf('mcp__foobar__x', known)).toBe('foobar')
   })
 
+  it.each([
+    { tool: 'mcp__a___tool', known: ['a', 'a_'], want: 'a_' },
+    { tool: 'mcp__a____tool', known: ['a', 'a_', 'a__'], want: 'a__' },
+    { tool: 'mcp__a__b__tool', known: ['a', 'a__b'], want: 'a__b' },
+    { tool: 'mcp____tool', known: [''], want: '' },
+    { tool: 'mcp__a__', known: ['a'], want: 'a' },
+    { tool: 'mcp__a__', known: [], want: null },
+    { tool: 'mcp__a__', known: undefined, want: null },
+    { tool: 'mcp__foobar__tool', known: ['foo'], want: 'foobar' },
+    { tool: 'mcp__unknown__tool', known: [], want: 'unknown' },
+    { tool: `mcp__${'a'.repeat(32)}__tool`, known: undefined, want: 'a'.repeat(32) },
+    { tool: `mcp__${'a'.repeat(33)}__tool`, known: [], want: null },
+    { tool: `mcp__${'a'.repeat(33)}__tool`, known: ['a'.repeat(33)], want: 'a'.repeat(33) },
+  ])('preserves boundary behavior for $tool with known=$known', ({ tool, known, want }) => {
+    expect(serverNameOf(tool, known === undefined ? undefined : new Set(known))).toBe(want)
+  })
+
   it('falls back to the heuristic when the known set misses', () => {
     const known = new Set(['unrelated'])
     expect(serverNameOf('mcp__codegraph__codegraph_explore', known)).toBe('codegraph')
@@ -45,6 +76,14 @@ describe('serverNameOf', () => {
 })
 
 describe('classifyMcp', () => {
+  it('keeps overlapping trailing underscores under their configured server', () => {
+    const name = 'mcp__a____lookup'
+    expect(classifyMcp({
+      scopeToolNames: [name], restrictableNames: new Set([name]), loaderServers: ['a_', 'a__'],
+    }).map(row => [row.serverName, row.toolNames, row.restrictable])).toEqual([
+      ['a_', [], false], ['a__', [name], true],
+    ])
+  })
   it('groups ambiguous names under the longest configured server prefix', () => {
     const name = 'mcp__foo__bar__lookup'
     expect(classifyMcp({
