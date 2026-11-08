@@ -42,7 +42,8 @@ const deniedOf = (global: LayerPolicy, domain: Domain): readonly string[] =>
  * 建一个「某域名字 → 是否启用」的判定函数（设计 4.1）。
  *
  * 规则只有一条：**工作区有决定就用决定，没有就跟随全局**。
- * `false` 是有效值，所以只能写 `??`，不能用 `||`（`false || 默认` 会吞掉「明令关」）。
+ * 只有自有键才是决定，不能把 constructor 等继承属性当成状态。
+ * `false` 是有效值，所以回退用 `??`，不能用 `||`（`false || 默认` 会吞掉「明令关」）。
  *
  * 返回函数而不是单次判定：调用方（`hiddenNames`、工作区视图）都是按域遍历，
  * 每次调用都重建 Set 会让 512 项的清单退化成 O(n²)。全局名单里同一个名字
@@ -51,7 +52,7 @@ const deniedOf = (global: LayerPolicy, domain: Domain): readonly string[] =>
 export function openResolver(effective: EffectivePolicy, domain: Domain): (name: string) => boolean {
   const denied = new Set(deniedOf(effective.global, domain))
   const local = effective.workspace?.[domain]
-  return (name) => local?.[name] ?? !denied.has(name)
+  return (name) => (local !== undefined && Object.hasOwn(local, name) ? local[name] : undefined) ?? !denied.has(name)
 }
 
 /**

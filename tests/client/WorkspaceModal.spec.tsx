@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, within } from '@testing-library/react'
+import { cleanup, render, screen, within, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { apply } from '../../src/client/index.tsx'
@@ -134,6 +134,64 @@ describe('WorkspaceModal chip registration', () => {
     const names = slotRegistrations.map((r) => [r['name'], r['id'] ?? r['key']])
     expect(names).toContainEqual(['conversation.input.right', 'skill-scope-workspace'])
     expect(names).toContainEqual(['shell.overlay', 'skill-scope-workspace-modal'])
+  })
+})
+
+describe('WorkspaceModal own-key policy semantics', () => {
+  const cases = (['skills', 'mcps'] as const).flatMap((domain) =>
+    ['constructor', '__proto__'].map((name) => ({ domain, name })),
+  )
+  const specialValue = (domain: 'skills' | 'mcps', name: string, denied: boolean) => ({
+    ...workspaceValue,
+    global: {
+      ...workspaceValue.global,
+      skills: domain === 'skills' && denied ? [name] : [],
+      mcps: domain === 'mcps' && denied ? [name] : [],
+    },
+    workspace: { skills: {}, mcps: {} },
+    inventory: {
+      skills: domain === 'skills' ? [{ ...workspaceValue.inventory.skills[0]!, name }] : [],
+      mcps: domain === 'mcps' ? [{ ...workspaceValue.inventory.mcps[0]!, serverName: name }] : [],
+    },
+  })
+
+  it.each(cases)('follows global denial for absent $domain / $name without marking an override', async ({ domain, name }) => {
+    const value = specialValue(domain, name, true)
+    fetchMock.mockResolvedValueOnce(jsonOk({ ok: true, value }))
+    render(<WorkspaceModal sessionId="s1" onClose={() => {}} />)
+    const row = await screen.findByTestId(domain === 'skills' ? `ws-skill-${name}` : `mcp-${name}`)
+    expect(within(row).getByRole('switch', { name }).getAttribute('aria-checked')).toBe('false')
+    expect(within(row).queryByTestId('ws-overridden')).toBeNull()
+  })
+
+  it.each(cases)('does not mark absent $domain / $name as different from an enabled global default', async ({ domain, name }) => {
+    const value = specialValue(domain, name, false)
+    fetchMock.mockResolvedValueOnce(jsonOk({ ok: true, value }))
+    render(<WorkspaceModal sessionId="s1" onClose={() => {}} />)
+    const row = await screen.findByTestId(domain === 'skills' ? `ws-skill-${name}` : `mcp-${name}`)
+    expect(within(row).queryByTestId('ws-overridden')).toBeNull()
+  })
+
+  it.each(cases)('saves and restores a JSON own-key override for $domain / $name', async ({ domain, name }) => {
+    const value = specialValue(domain, name, false)
+    // JSON.parse 必须创建真正的 __proto__ 自有键，不能用对象字面量的特殊语法。
+    const explicit = JSON.parse(`{"skills":{},"mcps":{},"${domain}":{"${name}":false}}`)
+    fetchMock.mockResolvedValueOnce(jsonOk({ ok: true, value }))
+    fetchMock.mockResolvedValueOnce(jsonOk({ ok: true, value: { ...value, workspace: explicit, revision: 'r2' } }))
+    fetchMock.mockResolvedValueOnce(jsonOk({ ok: true, value: { ...value, revision: 'r3' } }))
+    render(<WorkspaceModal sessionId="s1" onClose={() => {}} />)
+    const row = await screen.findByTestId(domain === 'skills' ? `ws-skill-${name}` : `mcp-${name}`)
+    await user.click(within(row).getByRole('switch', { name }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    const body = JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body))
+    expect(Object.hasOwn(body.workspace[domain], name)).toBe(true)
+    expect(body.workspace[domain][name]).toBe(false)
+    await waitFor(() => expect(within(row).getByRole('switch', { name }).getAttribute('aria-checked')).toBe('false'))
+    expect(within(row).getByTestId('ws-overridden')).toBeTruthy()
+    await user.click(within(row).getByRole('switch', { name }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+    const restored = JSON.parse(String((fetchMock.mock.calls[2]?.[1] as RequestInit).body))
+    expect(Object.hasOwn(restored.workspace[domain], name)).toBe(false)
   })
 })
 

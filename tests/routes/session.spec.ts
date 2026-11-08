@@ -51,14 +51,17 @@ function makeCtx(options: {
   const sessionQuery = {
     // 用一个独立标记证明 `this` 绑定正确：只有当 `this` 就是 sessionQuery 本身时
     // 才允许返回观察体，否则抛错。摘出方法当普通函数调 → `this === undefined` → 抛错。
-    observeSession: async function (this: unknown) {
+    observeSession: async function (this: unknown, _id: string, mode: { projectionMode: 'all' | 'none' }) {
       if (this !== sessionQuery) {
         throw new Error(`observeSession called with wrong this: ${String(this)}`)
       }
       if (options.observeThrows === true) throw new Error('EIO: projection read failed')
       // 原样返回同一个对象：**不能用 `{ ...observation }`**，展开会立刻求值
       // `projections` getter，把「读取时抛错」提前成「构造时抛错」，测不到 finally。
-      return observation
+      return mode.projectionMode === 'all' ? observation : {
+        header: observation['header'],
+        [Symbol.dispose]: () => { observationDisposed = true },
+      }
     },
   }
   const agents = {
@@ -87,6 +90,47 @@ function makeCtx(options: {
 }
 
 describe('resolveSession', () => {
+  it('recovers a cold session header with none when all projection work rejects', async () => {
+    const modes: string[] = []
+    let releases = 0
+    const query = {
+      async observeSession(_id: string, options: { projectionMode: string }) {
+        expect(this).toBe(query)
+        modes.push(options.projectionMode)
+        if (options.projectionMode === 'all') {
+          throw Object.assign(new Error('projection failed'), { code: 'SESSION_QUERY_CORRUPT_SESSION' })
+        }
+        return { header: { cwd: '/cold/project' }, [Symbol.dispose]() { releases++ } }
+      },
+    }
+    const warnings: string[] = []
+    const ctx: PluginContextLike = {
+      get: name => name === 'sessionQuery' ? query : undefined,
+      logger: { warn: message => { warnings.push(message) } },
+    }
+    expect(await resolveSession(ctx, 'cold')).toEqual({
+      sessionId: 'cold', cwd: '/cold/project', agentPreset: null, agent: null, live: false,
+    })
+    expect(modes).toEqual(['all', 'none'])
+    expect(releases).toBe(1)
+    expect(warnings).toHaveLength(1)
+  })
+
+  it('does not retry a missing session as a projection failure', async () => {
+    const modes: string[] = []
+    const ctx: PluginContextLike = {
+      get: name => name === 'sessionQuery' ? {
+        async observeSession(_id: string, options: { projectionMode: string }) {
+          modes.push(options.projectionMode)
+          throw Object.assign(new Error('missing session'), { code: 'SESSION_QUERY_SESSION_NOT_FOUND' })
+        },
+      } : undefined,
+      logger: { warn() {} },
+    }
+    expect(await resolveSession(ctx, 'missing')).toBeNull()
+    expect(modes).toEqual(['all'])
+  })
+
   it('resolves cwd and preset through sessionQuery, then prefers the live agent', async () => {
     const { ctx } = makeCtx({ agent: liveAgent })
     expect(await resolveSession(ctx, 's1')).toMatchObject({

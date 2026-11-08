@@ -273,13 +273,14 @@ describe('installAgentHooks', () => {
     ])
   })
 
-  it('applies the shadow and the restriction at creation, before the first assembly', async () => {
+  it('applies the shadow and the restriction after creation in the background', async () => {
     const ctx = makeFakeCtx() as unknown as Context & FakeContext
     const harness = makeHarness({
       workspace: { skills: { demo: false }, mcps: {} },
     })
     installAgentHooks(ctx, harness.deps)
     await fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })
+    await vi.waitFor(() => expect(harness.shadowCalls).toContain('demo'))
 
     // 工作区层关掉 demo ⇒ demo 被遮蔽。
     expect(harness.shadowCalls).toContain('demo')
@@ -287,13 +288,10 @@ describe('installAgentHooks', () => {
     expect(harness.shadowed.has('demo')).toBe(true)
     // 遮蔽全部落地 ⇒ 不得有「遮蔽未生效」警告（传错对象会整批误报）。
     expect(harness.warn).not.toHaveBeenCalledWith(expect.stringContaining('遮蔽未生效'))
-    // 第二个实参：**`asAgentLike` 新造的那个对象**（`onCreated` 一律重包负载），
-    // 既不是 `harness.agent`，也不是 `agent.raw`。这看起来绕，但正合真实情形——
-    // 装配层需要的是它上面的 `ctx`，而 `asAgentLike` 把 `ctx` **原样透传**，
-    // 所以 `makeScopedSkills` 的 `agent.ctx.get('skills')` 取到的仍是正确的作用域实例。
-    // 反过来，`snapshot({ scope })` 走对象身份索引，才必须用 `agent.raw`。
-    expect(harness.registerScopes).not.toContain(harness.agent)
-    expect(harness.registerScopes).toContain(harness.states.get('a1')?.agent)
+    // Scope-sensitive lookups and registrations must receive the raw host object.
+    expect(harness.registerScopes).toContain(harness.agent)
+    expect(harness.registerScopes).not.toContain(harness.states.get('a1')?.agent)
+    expect(harness.verifyCalls.every((call) => call.scope === harness.agent)).toBe(true)
     // 没有 workspace 层的 mcp 关闭项 ⇒ 空 deny 不调 restrict（否则宿主抛 no-op）。
     expect(harness.restrictCalls).toEqual([])
   })
@@ -316,6 +314,7 @@ describe('installAgentHooks', () => {
     })
     installAgentHooks(ctx, harness.deps)
     await fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })
+    await vi.waitFor(() => expect(harness.shadowCalls).toContain('office-probe'))
 
     expect(harness.shadowCalls).toContain('office-probe')
     expect(harness.shadowed.has('office-probe')).toBe(true)
@@ -328,6 +327,7 @@ describe('installAgentHooks', () => {
     const harness = makeHarness({ agentSkills: ['demo', 'other'] })
     installAgentHooks(ctx, harness.deps)
     await fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })
+    await vi.waitFor(() => expect(harness.states.get('a1')?.policy).not.toBeNull())
     expect(harness.states.get('a1')?.policy).not.toBeNull()
 
     // 保存后 store 返回新策略，且变化通过 skills/change 到达。
@@ -368,8 +368,33 @@ describe('installAgentHooks', () => {
     const harness = makeHarness({ complete: false })
     installAgentHooks(ctx, harness.deps)
     await fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })
+    await vi.waitFor(() => expect(harness.warn).toHaveBeenCalledWith(expect.stringContaining('incomplete')))
     expect(harness.shadowCalls).toEqual([])
-    expect(harness.warn).toHaveBeenCalledWith(expect.stringContaining('incomplete'))
+  })
+
+  it('keeps the hidden MCP inventory stable after applying a restriction', async () => {
+    const ctx = makeFakeCtx() as unknown as Context & FakeContext
+    const harness = makeHarness({ workspace: { skills: {}, mcps: { gbrain: false } } })
+    const visible = new Set(['mcp__gbrain__search'])
+    const tools = harness.deps.tools as McpToolFace & { schemas: () => Array<{ name: string }> }
+    tools.schemas = () => [...visible].map((name) => ({ name }))
+    const restrict = harness.deps.scopedTools.restrict
+    harness.deps.scopedTools.restrict = (filter) => {
+      const release = restrict(filter)
+      visible.clear()
+      return () => {
+        release()
+        visible.add('mcp__gbrain__search')
+      }
+    }
+
+    installAgentHooks(ctx, harness.deps)
+    await fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })
+    await vi.waitFor(() => expect(harness.restrictCalls).toHaveLength(1))
+    await new Promise<void>((resolve) => setTimeout(resolve, 10))
+
+    expect(harness.restrictCalls).toHaveLength(1)
+    expect(visible).toEqual(new Set())
   })
 
   it('coalesces external changes while an application is blocked and applies the latest inventory', async () => {
@@ -418,7 +443,7 @@ describe('installAgentHooks', () => {
     expect(maxActiveRegisters).toBe(1)
   })
 
-  it('resolves a queued reapply request before the active drain completes, then converges', async () => {
+  it('returns from agent creation before a slow background application completes', async () => {
     const ctx = makeFakeCtx() as unknown as Context & FakeContext
     const harness = makeHarness({ globalSkills: ['demo', 'other'], agentSkills: ['demo', 'other'] })
     let releaseSnapshot!: () => void
@@ -441,16 +466,17 @@ describe('installAgentHooks', () => {
       const created = fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })
         .then(() => { createdFinished = true })
       await started
+      await vi.waitFor(() => expect(createdFinished).toBe(true))
       harness.state.workspace = { skills: { other: false }, mcps: {} }
       await expect(hooks.reapply()).resolves.toBeUndefined()
-      expect(createdFinished).toBe(false)
       expect(snapshotCalls).toBe(1)
       expect(harness.shadowCalls).toEqual([])
       releaseSnapshot()
+      await vi.waitFor(() => {
+        expect(harness.shadowCalls).toEqual(['other'])
+        expect(harness.states.get('a1')?.policy?.workspace).toEqual({ skills: { other: false }, mcps: {} })
+      })
       await created
-      expect(snapshotCalls).toBeGreaterThan(1)
-      expect(harness.shadowCalls).toEqual(['other'])
-      expect(harness.states.get('a1')?.policy?.workspace).toEqual({ skills: { other: false }, mcps: {} })
     } finally {
       releaseSnapshot()
       hooks.stopAll()
@@ -493,7 +519,7 @@ describe('installAgentHooks', () => {
     }
     installAgentHooks(ctx, harness.deps)
     await fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })
-    expect(verifyCalls).toHaveLength(2)
+    await vi.waitFor(() => expect(verifyCalls).toHaveLength(2))
     expect(harness.shadowCalls).toEqual([])
     complete = true
     harness.state.workspace = { skills: { demo: false }, mcps: {} }
@@ -522,6 +548,7 @@ describe('installAgentHooks', () => {
     })
     installAgentHooks(ctx, harness.deps)
     await fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })
+    await vi.waitFor(() => expect(harness.shadowCalls.flat()).toEqual(['demo']))
     // 创建只注册、不释放：此时 released 必须还是空的。
     expect(harness.released).toEqual([])
     expect(harness.shadowCalls.flat()).toEqual(['demo'])
@@ -541,6 +568,7 @@ describe('installAgentHooks', () => {
     })
     const stop = installAgentHooks(ctx, harness.deps)
     await fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })
+    await vi.waitFor(() => expect(harness.shadowed.has('demo')).toBe(true))
     stop.stopAll()
     // 卸载释放那一个存活状态：skill shadow 一次、restriction 一次。
     expect(harness.released).toEqual(['demo'])

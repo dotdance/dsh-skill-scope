@@ -48,7 +48,8 @@ function releaseObservation(ctx: PluginContextLike, observation: unknown, sessio
  * 把一个 `sessionId` 解析成传输层视图（设计 6.3）。
  *
  * 顺序固定为「先问宿主拿到 cwd 与 preset，再优先取 live Agent」：
- * 1. `sessionQuery.observeSession(sessionId, { projectionMode: 'none' })` —— 只读快照，不要投影推送。
+ * 1. `sessionQuery.observeSession(sessionId, { projectionMode: 'all' })` —— 读取 preset；
+ *    投影观察失败时回退 `none`，保留 cwd，preset 为 null。
  * 2. `agents.get(sessionId)` —— 拿到就说明该会话是活跃的，它的清单才是实时清单。
  *
  * **observation 必须在 `finally` 里 `dispose()`**：宿主会为每次观察保留订阅，
@@ -81,7 +82,15 @@ export async function resolveSession(ctx: PluginContextLike, sessionId: string):
       //    调用的正确写法是先把方法绑回它的宿主对象再调用
       //    （`const observe = query.observeSession.bind(query)`），
       //    因此这里用 `observe.call(sessionQuery, ...)` 而不是 `observe(...)`。
-      observation = await observe.call(sessionQuery, sessionId, { projectionMode: 'none' })
+      try {
+        observation = await observe.call(sessionQuery, sessionId, { projectionMode: 'all' })
+      } catch (error) {
+        // 当前宿主的 all 会因投影失败整体 reject；none 可独立取得 header lease。
+        // 会话不存在时不重试，避免把缺失误当成投影故障。
+        if (readString(asRecord(error), 'code') === 'SESSION_QUERY_SESSION_NOT_FOUND') throw error
+        ctx.logger.warn(`dsh-skill-scope: 读取会话投影失败，回退无投影观察（sessionId=${sessionId}）：${String(error)}`)
+        observation = await observe.call(sessionQuery, sessionId, { projectionMode: 'none' })
+      }
     } catch (error) {
       // 未知会话在这里就 reject。不是致命错误：agent 侧仍可能给出答案，交给下面的分支处理。
       ctx.logger.warn(`dsh-skill-scope: 观察会话失败（sessionId=${sessionId}）：${String(error)}`)

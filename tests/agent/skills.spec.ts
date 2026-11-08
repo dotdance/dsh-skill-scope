@@ -267,4 +267,299 @@ describe('applySkillShadow', () => {
     expect(registered).toEqual([])
     expect(warnings).toHaveLength(1)
   })
+
+  it('uses raw host identity for definition lookup and registration', async () => {
+    const hostAgent = { id: 's1' }
+    const standIn = { id: 's1' }
+    const { skills, scoped, logger } = makeDeps({ demo: definition })
+    const lookupScopes: unknown[] = []
+    const registrationScopes: unknown[] = []
+    const recordingSkills = {
+      ...skills,
+      get: async (name: string, options: { scope: unknown; cwd: string }) => {
+        lookupScopes.push(options.scope)
+        return skills.get(name, options)
+      },
+    }
+    const recordingScoped: ScopedSkillsFace = {
+      register: (skill, agent) => {
+        registrationScopes.push(agent)
+        return scoped.register(skill, agent)
+      },
+    }
+
+    await applySkillShadow({
+      skills: recordingSkills,
+      scoped: recordingScoped,
+      cwd: '/x',
+      agent: standIn,
+      scopeOf: hostAgent,
+      hidden: ['demo'],
+      serial: (op) => op(),
+      logger,
+    })
+
+    expect(lookupScopes).toHaveLength(1)
+    expect(lookupScopes[0]).toBe(hostAgent)
+    expect(registrationScopes).toHaveLength(1)
+    expect(registrationScopes[0]).toBe(hostAgent)
+  })
+
+  it('fetches replacement definitions before releasing the previous shadow', async () => {
+    const { skills, scoped, registered, released, logger } = makeDeps({
+      demo: definition,
+      next: { ...definition, name: 'next' },
+    })
+    const first = await applySkillShadow({
+      skills, scoped, cwd: '/x', agent: { id: 's1' }, hidden: ['demo'],
+      serial: (op) => op(), logger,
+    })
+    const events: string[] = []
+    const replacementSkills = {
+      ...skills,
+      get: async (name: string, options: { scope: unknown; cwd: string }) => {
+        events.push(`get:${name}`)
+        if (name === 'next') throw new Error('definition fetch failed')
+        return skills.get(name, options)
+      },
+    }
+
+    await expect(applySkillShadow({
+      skills: replacementSkills, scoped, cwd: '/x', agent: { id: 's1' }, hidden: ['next'],
+      serial: (op) => op(), logger, previous: first.release,
+    })).rejects.toThrow('definition fetch failed')
+
+    expect(events).toEqual(['get:next'])
+    expect(released).toEqual([])
+    expect(registered).toHaveLength(1)
+  })
+
+  it('cleans partial registrations and attempts to restore the previous shadow', async () => {
+    const { skills, scoped, registered, released, logger } = makeDeps({
+      demo: definition,
+      next: { ...definition, name: 'next' },
+      broken: { ...definition, name: 'broken' },
+    })
+    const first = await applySkillShadow({
+      skills, scoped, cwd: '/x', agent: { id: 's1' }, hidden: ['demo'],
+      serial: (op) => op(), logger,
+    })
+    const failingScoped: ScopedSkillsFace = {
+      register: (skill, agent) => {
+        if (skill['name'] === 'broken') throw new Error('registration failed')
+        return scoped.register(skill, agent)
+      },
+    }
+
+    await expect(applySkillShadow({
+      skills, scoped: failingScoped, cwd: '/x', agent: { id: 's1' }, hidden: ['next', 'broken'],
+      serial: (op) => op(), logger, previous: first.release,
+    })).rejects.toThrow('registration failed')
+
+    expect(released).toEqual(['demo', 'next'])
+    expect(registered.map((item) => item['name'])).toEqual(['demo', 'next', 'demo'])
+  })
+
+  it('retains a partial disposer that throws before undo for later cleanup', async () => {
+    const active = new Set<string>()
+    let partialDisposeAttempts = 0
+    const { skills, logger } = makeDeps({ demo: definition, next: { ...definition, name: 'next' }, broken: { ...definition, name: 'broken' } })
+    const scoped: ScopedSkillsFace = {
+      register: (skill) => {
+        const name = String(skill['name'])
+        if (name === 'broken') throw new Error('replacement failed')
+        active.add(name)
+        return () => {
+          if (name === 'next' && partialDisposeAttempts++ === 0) throw new Error('undo failed before removal')
+          active.delete(name)
+        }
+      },
+    }
+    const first = await applySkillShadow({
+      skills, scoped, cwd: '/x', agent: { id: 's1' }, hidden: ['demo'],
+      serial: (op) => op(), logger,
+    })
+
+    await expect(applySkillShadow({
+      skills, scoped, cwd: '/x', agent: { id: 's1' }, hidden: ['next', 'broken'],
+      serial: (op) => op(), logger, previous: first.release,
+    })).rejects.toThrow('replacement failed')
+
+    expect(active).toEqual(new Set(['demo', 'next']))
+    first.release()
+    expect(partialDisposeAttempts).toBe(2)
+    expect(active).toEqual(new Set())
+  })
+
+  it('does not restore an old same-name shadow over an unresolved partial registration', async () => {
+    const active = new Map<string, string>()
+    let disposeAttempts = 0
+    const warnings: string[] = []
+    const oldDefinition = { ...definition, content: 'old' }
+    const newDefinition = { ...definition, content: 'new' }
+    const { skills } = makeDeps({ demo: oldDefinition, broken: { ...definition, name: 'broken' } })
+    const scoped: ScopedSkillsFace = {
+      register: (skill) => {
+        const name = String(skill['name'])
+        if (name === 'broken') throw new Error('replacement failed')
+        const content = String(skill['content'])
+        active.set(name, content)
+        return () => {
+          if (content === 'new' && disposeAttempts++ === 0) throw new Error('new shadow still active')
+          active.delete(name)
+        }
+      },
+    }
+    const logger = { warn: (message: string) => warnings.push(message) }
+    const first = await applySkillShadow({
+      skills, scoped, cwd: '/x', agent: { id: 's1' }, hidden: ['demo'],
+      serial: (op) => op(), logger,
+    })
+
+    await expect(applySkillShadow({
+      skills: { ...skills, get: async (name, options) => name === 'demo' ? newDefinition : skills.get(name, options) },
+      scoped, cwd: '/x', agent: { id: 's1' }, hidden: ['demo', 'broken'],
+      serial: (op) => op(), logger, previous: first.release,
+    })).rejects.toThrow('replacement failed')
+
+    expect(active.get('demo')).toBe('new')
+    expect(warnings.some((message) => message.includes('尚未释放'))).toBe(true)
+    first.release()
+    expect(active.has('demo')).toBe(false)
+  })
+
+  it('continues restoring later old definitions when one restoration throws', async () => {
+    const active = new Set<string>()
+    let failDemoRestore = false
+    const warnings: string[] = []
+    const { skills } = makeDeps({ demo: definition, other: { ...definition, name: 'other' }, broken: { ...definition, name: 'broken' } })
+    const scoped: ScopedSkillsFace = {
+      register: (skill) => {
+        const name = String(skill['name'])
+        if (name === 'broken') throw new Error('replacement failed')
+        if (name === 'demo' && failDemoRestore) {
+          failDemoRestore = false
+          throw new Error('demo restore failed')
+        }
+        active.add(name)
+        return () => { active.delete(name) }
+      },
+    }
+    const logger = { warn: (message: string) => warnings.push(message) }
+    const first = await applySkillShadow({
+      skills, scoped, cwd: '/x', agent: { id: 's1' }, hidden: ['demo', 'other'],
+      serial: (op) => op(), logger,
+    })
+    failDemoRestore = true
+
+    await expect(applySkillShadow({
+      skills, scoped, cwd: '/x', agent: { id: 's1' }, hidden: ['broken'],
+      serial: (op) => op(), logger, previous: first.release,
+    })).rejects.toThrow('replacement failed')
+
+    expect(active).toEqual(new Set(['other']))
+    expect(warnings.some((message) => message.includes('demo restore failed'))).toBe(true)
+    first.release()
+    expect(active).toEqual(new Set())
+  })
+
+  it('retains failed initial cleanup for the next apply without a previous handle', async () => {
+    let attempts = 0
+    const { skills } = makeDeps({ demo: definition, other: { ...definition, name: 'other' }, broken: { ...definition, name: 'broken' } })
+    const registrations: string[] = []
+    const logger = { warn: () => {} }
+    const scoped: ScopedSkillsFace = {
+      register: (skill) => {
+        const name = String(skill['name'])
+        registrations.push(name)
+        if (name === 'broken') throw new Error('initial replacement failed')
+        return () => {
+          if (name !== 'demo') return
+          attempts += 1
+          if (attempts <= 2) throw new Error('initial cleanup failed')
+        }
+      },
+    }
+    const agent = { id: 'initial' }
+    await expect(applySkillShadow({
+      skills, scoped, cwd: '/x', agent, hidden: ['demo', 'broken'],
+      serial: (op) => op(), logger,
+    })).rejects.toThrow('initial replacement failed')
+
+    await applySkillShadow({
+      skills, scoped, cwd: '/x', agent, hidden: ['other'],
+      serial: (op) => op(), logger,
+    })
+    await applySkillShadow({
+      skills, scoped, cwd: '/x', agent, hidden: ['other'],
+      serial: (op) => op(), logger,
+    })
+    expect(attempts).toBe(3)
+    expect(registrations).toContain('other')
+  })
+
+  it.each([false, true])('skips unresolved names while unrelated names proceed (previous=%s)', async (hasPrevious) => {
+    const { skills, logger } = makeDeps({ demo: definition, other: { ...definition, name: 'other' }, broken: { ...definition, name: 'broken' } })
+    const registrations: string[] = []
+    const scoped: ScopedSkillsFace = {
+      register: (skill) => {
+        const name = String(skill['name'])
+        registrations.push(name)
+        if (name === 'broken') throw new Error('install failed')
+        return () => { if (name === 'demo') throw new Error('still registered') }
+      },
+    }
+    const agent = {}
+    const base = { skills, scoped, cwd: '/x', agent, serial: <T>(op: () => Promise<T>) => op(), logger }
+    const first = hasPrevious ? await applySkillShadow({ ...base, hidden: ['demo'] }) : undefined
+    if (!hasPrevious) {
+      await expect(applySkillShadow({ ...base, hidden: ['demo', 'broken'] })).rejects.toThrow('install failed')
+    }
+    registrations.length = 0
+    const next = await applySkillShadow({
+      ...base, hidden: ['demo', 'other'], ...(first === undefined ? {} : { previous: first.release }),
+    })
+    expect(registrations).toEqual(['other'])
+    expect(next.applied).toEqual(['other'])
+  })
+
+  it('keeps the shadow disposer when verification snapshot rejects', async () => {
+    const { skills, scoped, registered, released, logger, warnings } = makeDeps({ demo: definition })
+    const rejectingSkills = {
+      ...skills,
+      snapshot: async () => { throw new Error('snapshot failed') },
+    }
+
+    const handle = await applySkillShadow({
+      skills: rejectingSkills, scoped, cwd: '/x', agent: { id: 's1' }, hidden: ['demo'],
+      serial: (op) => op(), logger, verifyStillVisible: true,
+    })
+    handle.release()
+
+    expect(registered).toHaveLength(1)
+    expect(released).toEqual(['demo'])
+    expect(warnings.join(' ')).toContain('snapshot failed')
+  })
+
+  it('runs remaining disposers after one disposer throws', async () => {
+    const released: string[] = []
+    const warnings: string[] = []
+    const scoped: ScopedSkillsFace = {
+      register: (skill) => () => {
+        const name = String(skill['name'])
+        released.push(name)
+        if (name === 'demo') throw new Error('dispose failed')
+      },
+    }
+    const handle = await applySkillShadow({
+      skills: makeDeps({ demo: definition, other: { ...definition, name: 'other' } }).skills,
+      scoped, cwd: '/x', agent: { id: 's1' }, hidden: ['demo', 'other'],
+      serial: (op) => op(), logger: { warn: (message) => warnings.push(message) },
+    })
+
+    handle.release()
+
+    expect(released).toEqual(['demo', 'other'])
+    expect(warnings.join(' ')).toContain('dispose failed')
+  })
 })

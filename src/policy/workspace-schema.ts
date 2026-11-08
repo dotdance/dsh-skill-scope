@@ -41,9 +41,7 @@ const WORKSPACE_KEY = 'workspace'
 const LEGACY_KEY = 'default'
 
 const sortKeys = (map: StateMap): StateMap => {
-  const out: StateMap = {}
-  for (const name of Object.keys(map).sort()) out[name] = map[name] as boolean
-  return out
+  return Object.fromEntries(Object.keys(map).sort().map((name) => [name, map[name] as boolean]))
 }
 
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
@@ -60,7 +58,8 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> =>
  * `MAX_NAMES` 上限仍然保留：只为防止文件被写成无界清单，正常用量远低于它。
  */
 function parseDomain(raw: unknown, label: string): { map: StateMap; warnings: string[] } {
-  const map: StateMap = {}
+  // 名字来自 JSON/旧名单，__proto__ 也必须作为普通自有键保存。
+  const map: StateMap = Object.create(null) as StateMap
   const warnings: string[] = []
   if (raw === undefined) return { map, warnings }
   if (!isPlainObject(raw)) {
@@ -87,7 +86,8 @@ function parseDomain(raw: unknown, label: string): { map: StateMap; warnings: st
 
 /** 旧格式：`default.skills` 是黑名单数组，每一项的含义都是「关」。 */
 function parseLegacyDomain(raw: unknown, label: string): { map: StateMap; warnings: string[] } {
-  const map: StateMap = {}
+  // 名字来自 JSON/旧名单，__proto__ 也必须作为普通自有键保存。
+  const map: StateMap = Object.create(null) as StateMap
   const warnings: string[] = []
   if (raw === undefined) return { map, warnings }
   if (!Array.isArray(raw)) {
@@ -175,7 +175,7 @@ export function filterAgainstGlobal(policy: WorkspacePolicy, global: LayerPolicy
     mcps: new Set(global.mcps),
   } satisfies Record<Domain, Set<string>>
   const pick = (map: StateMap, domain: Domain): StateMap => {
-    const out: StateMap = {}
+    const out: StateMap = Object.create(null) as StateMap
     for (const [name, value] of Object.entries(map)) {
       const globalOpen = !denied[domain].has(name)
       if (value !== globalOpen) out[name] = value
@@ -203,11 +203,11 @@ export function serializeWorkspacePolicy(
   previousText: string | undefined,
   global: LayerPolicy,
 ): string {
-  const base: Record<string, unknown> = {}
+  let base: Record<string, unknown> = {}
   if (previousText !== undefined && previousText.trim() !== '') {
     try {
       const parsed: unknown = JSON.parse(previousText)
-      if (isPlainObject(parsed)) Object.assign(base, parsed)
+      if (isPlainObject(parsed)) base = { ...parsed }
     } catch {
       // 旧文坏了：当作全新文件。不能因为无法解析就不让用户保存。
     }

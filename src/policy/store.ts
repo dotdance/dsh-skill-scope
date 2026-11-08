@@ -185,8 +185,9 @@ export class PolicyStore {
   ): Promise<SaveOutcome> {
     const path = workspacePolicyPath(cwd)
     return await this.write(path, expected, async (current) => {
-      const global = await this.loadGlobal()
-      return serializeWorkspacePolicy(policy, current ?? undefined, global.policy)
+      const globalText = await this.readTransactionText(globalPolicyPath())
+      const global = parseGlobalPolicy(globalText ?? undefined).policy
+      return serializeWorkspacePolicy(policy, current ?? undefined, global)
     })
   }
 
@@ -198,6 +199,16 @@ export class PolicyStore {
     } catch (error) {
       this.logger.warn(`dsh-skill-scope: 读取策略文件失败（按不存在处理）：${path}：${String(error)}`)
       return null
+    }
+  }
+
+  /** 写事务只能把 ENOENT 当作不存在；探测失败不能成为覆盖旧文件的依据。 */
+  private async readTransactionText(path: string): Promise<string | null> {
+    try {
+      return await this.fs.readFile(path)
+    } catch (error) {
+      if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') return null
+      throw error
     }
   }
 
@@ -239,7 +250,7 @@ export class PolicyStore {
       // 早期实现传的是 `policyLockPath(path)`（已带 `.lock`），锁名成了
       // `*.lock.lock`，两个缺陷叠加成同一个报错。
       return await this.lock(path, async (): Promise<SaveOutcome> => {
-        const current = await this.readText(path)
+        const current = await this.readTransactionText(path)
         const currentRevision = current === null ? null : sha256Hex(current)
 
         // revision 守卫（D1/D2）：`expected == null` 只允许创建新文件；

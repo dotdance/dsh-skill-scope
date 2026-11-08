@@ -17,7 +17,7 @@ function makeFs(initial: Record<string, string> = {}) {
   const fs: PolicyFsLike = {
     readFile: async (path) => {
       const text = files.get(path)
-      if (text === undefined) throw new Error(`ENOENT: ${path}`)
+      if (text === undefined) throw Object.assign(new Error(`ENOENT: ${path}`), { code: 'ENOENT' })
       return text
     },
     fileExists: async (path) => files.has(path),
@@ -60,6 +60,56 @@ function makeStore(initial: Record<string, string> = {}) {
   })
   return { store, files, setThrowing, lockFiles, warnings }
 }
+
+describe('PolicyStore transactional read failures', () => {
+  const cases = ['EIO', 'EACCES'].flatMap((code) =>
+    (['global', 'workspace', 'dependency', 'display'] as const).flatMap((operation) =>
+      [true, false].map((reportsExists) => ({ code, operation, reportsExists })),
+    ),
+  )
+  it.each(cases)('blocks $operation on $code (exists=$reportsExists)', async ({ code, operation, reportsExists }) => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dsh-sm-unreadable-'))
+    try {
+      const globalPath = globalPolicyPath()
+      const workspacePath = workspacePolicyPath(cwd)
+      const globalText = serializeGlobalPolicy({ ...EMPTY_POLICY, skills: ['keep'] })
+      const workspaceText = '{"note":"keep","workspace":{"skills":{"keep":true}}}'
+      const files = new Map([[globalPath, globalText], [workspacePath, workspaceText]])
+      const failedPath = operation === 'workspace' ? workspacePath : globalPath
+      let writes = 0
+      const store = new PolicyStore({
+        fs: {
+          fileExists: async (path) => path === failedPath ? reportsExists : files.has(path),
+          readFile: async (path) => {
+            if (path === failedPath) throw Object.assign(new Error(`${code}: unreadable`), { code })
+            return files.get(path)!
+          },
+          writeFile: async (path, text) => {
+            writes++
+            files.set(path, text)
+          },
+        },
+        lock: makeLock().lock,
+        logger: { warn: () => {} },
+      })
+      const outcome = operation === 'global'
+        ? await store.saveGlobal(EMPTY_POLICY, null)
+        : operation === 'display'
+          ? await store.setGlobalShowOfficialSkills(true)
+          : await store.saveWorkspace(cwd, { skills: { keep: false }, mcps: {} }, operation === 'workspace' ? null : sha256Hex(workspaceText))
+      expect(outcome, `${operation}, exists=${reportsExists}`).toMatchObject({ ok: false, code: 'write-failed' })
+      expect(writes, operation).toBe(0)
+      expect(files.get(globalPath)).toBe(globalText)
+      expect(files.get(workspacePath)).toBe(workspaceText)
+      // 展示/执行读取仍按空策略回退；写事务不能使用这个回退值。
+      const loaded = operation === 'workspace' ? await store.loadWorkspace(cwd) : await store.loadGlobal()
+      expect(loaded).toMatchObject({ exists: false, revision: null })
+      expect(loaded.policy).toEqual(operation === 'workspace' ? { skills: {}, mcps: {} } : EMPTY_POLICY)
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+})
 
 describe('PolicyStore', () => {
   it('returns exists:false and revision:null for a missing file', async () => {
@@ -245,6 +295,25 @@ describe('工作区策略', () => {
 
   afterEach(async () => {
     await rm(cwd, { recursive: true, force: true })
+  })
+
+  it('roundtrips special own capability keys and unknown fields through save and load', async () => {
+    const previous = '{"__proto__":{"keep":true},"constructor":"other-tool","workspace":{}}'
+    const policy = JSON.parse('{"skills":{"constructor":false,"__proto__":false},"mcps":{"constructor":true,"__proto__":true}}')
+    const { store, files } = makeStore({
+      [workspacePolicyPath(cwd)]: previous,
+      [globalPolicyPath()]: serializeGlobalPolicy({ ...EMPTY_POLICY, mcps: ['constructor', '__proto__'] }),
+    })
+    const result = await store.saveWorkspace(cwd, policy, sha256Hex(previous))
+    expect(result.ok).toBe(true)
+    const written = JSON.parse(files.get(workspacePolicyPath(cwd))!)
+    expect(written.workspace).toEqual(policy)
+    expect(Object.hasOwn(written, '__proto__')).toBe(true)
+    expect(written['__proto__']).toEqual({ keep: true })
+    expect(written['constructor']).toBe('other-tool')
+    const loaded = await store.loadWorkspace(cwd)
+    expect(loaded.policy).toEqual(policy)
+    expect(loaded.revision).toBe(sha256Hex(files.get(workspacePolicyPath(cwd))!))
   })
 
   it('loads from the workspace path and reports it', async () => {

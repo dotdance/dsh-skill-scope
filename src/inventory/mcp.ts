@@ -110,8 +110,9 @@ export function classifyMcp(input: {
   ownToolNames?: readonly string[]
 }): McpRow[] {
   const toolNamesByServer = new Map<string, Set<string>>()
+  const knownServers = new Set(input.loaderServers)
   for (const toolName of [...input.scopeToolNames, ...(input.ownToolNames ?? [])]) {
-    const serverName = serverNameOf(toolName)
+    const serverName = serverNameOf(toolName, knownServers)
     if (serverName === null) continue
     const bucket = toolNamesByServer.get(serverName) ?? new Set<string>()
     bucket.add(toolName)

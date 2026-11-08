@@ -39,7 +39,7 @@ function makeFs(initial: Record<string, string> = {}) {
   const fs: PolicyFsLike = {
     readFile: async (path) => {
       const text = files.get(path)
-      if (text === undefined) throw new Error(`ENOENT: ${path}`)
+      if (text === undefined) throw Object.assign(new Error(`ENOENT: ${path}`), { code: 'ENOENT' })
       return text
     },
     fileExists: async (path) => files.has(path),

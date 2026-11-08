@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { StrictMode, type ReactNode } from 'react'
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, expect, it } from 'vitest'
 import { usePolicyPanel } from '../../src/client/panel-state.ts'
@@ -13,6 +14,59 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reje
 }
 const load = async (): Promise<Value> => ({ revision: 'r1', names: [] })
 const toggle = (v: Value): Value => v
+const strict = ({ children }: { children: ReactNode }): ReactNode => <StrictMode>{children}</StrictMode>
+
+it('loads after StrictMode setup-cleanup-setup and ignores the first setup response', async () => {
+  const abandoned = deferred<Value>()
+  const active = deferred<Value>()
+  let reads = 0
+  const read = (): Promise<Value> => ++reads === 1 ? abandoned.promise : active.promise
+  const { result } = renderHook(() => usePolicyPanel({ load: read, save: async (_base, next) => next, toggle }), { wrapper: strict })
+  expect(reads).toBe(2)
+  await act(async () => { active.resolve({ revision: 'new', names: ['active'] }); await active.promise })
+  expect(result.current.value).toEqual({ revision: 'new', names: ['active'] })
+  await act(async () => { abandoned.resolve({ revision: 'old', names: [] }); await abandoned.promise })
+  expect(result.current.value).toEqual({ revision: 'new', names: ['active'] })
+})
+
+it('preserves queued optimistic saves after StrictMode replay', async () => {
+  const first = deferred<Value>()
+  const second = deferred<Value>()
+  const bases: string[] = []
+  const save = (base: Value): Promise<Value> => {
+    bases.push(base.revision)
+    return bases.length === 1 ? first.promise : second.promise
+  }
+  const { result } = renderHook(() => usePolicyPanel({ load, save, toggle }), { wrapper: strict })
+  await waitFor(() => expect(result.current.value).not.toBeNull())
+  act(() => {
+    void result.current.commit(v => ({ ...v, names: ['A'] }))
+    void result.current.commit(v => ({ ...v, names: [...v.names, 'B'] }))
+  })
+  await act(async () => { first.resolve({ revision: 'r2', names: ['A'] }); await first.promise })
+  expect(result.current.value?.names).toEqual(['A', 'B'])
+  expect(bases).toEqual(['r1', 'r2'])
+  expect(result.current.busy).toBe(true)
+  await act(async () => { second.resolve({ revision: 'r3', names: ['A', 'B'] }); await second.promise })
+  expect(result.current.value).toEqual({ revision: 'r3', names: ['A', 'B'] })
+  expect(result.current.busy).toBe(false)
+})
+
+it('keeps an unmounted save response out of a newer mounted panel', async () => {
+  const oldSave = deferred<Value>()
+  const save = (): Promise<Value> => oldSave.promise
+  const oldPanel = renderHook(() => usePolicyPanel({ load, save, toggle }))
+  await waitFor(() => expect(oldPanel.result.current.value).not.toBeNull())
+  act(() => { void oldPanel.result.current.commit(v => ({ ...v, names: ['old'] })) })
+  oldPanel.unmount()
+  const readNew = async (): Promise<Value> => ({ revision: 'new', names: ['new'] })
+  const newPanel = renderHook(() => usePolicyPanel({ load: readNew, save, toggle }), { wrapper: strict })
+  await waitFor(() => expect(newPanel.result.current.value?.revision).toBe('new'))
+  await act(async () => { oldSave.resolve({ revision: 'old', names: ['old'] }); await oldSave.promise })
+  expect(newPanel.result.current.value).toEqual({ revision: 'new', names: ['new'] })
+  expect(newPanel.result.current.busy).toBe(false)
+})
+
 
 it('preserves repeated changes to the same switch in click order', async () => {
   const first = deferred<Value>()

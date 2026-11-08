@@ -25,6 +25,28 @@ const workspace = (skills: Record<string, boolean> = {}, mcps: Record<string, bo
 
 const inv = { skills: ['a', 'b', 'c'], mcps: ['m1', 'm2'] }
 
+describe('own-key policy evaluation', () => {
+  it.each(['skills', 'mcps'] as const)('ignores inherited names in the %s map', (domain) => {
+    const effective: EffectivePolicy = { global: global(['constructor', '__proto__'], ['constructor', '__proto__']), workspace: workspace() }
+    const open = openResolver(effective, domain)
+    expect(open('constructor')).toBe(false)
+    expect(open('__proto__')).toBe(false)
+    expect(hiddenNames({ skills: ['constructor', '__proto__'], mcps: ['constructor', '__proto__'] }, effective)[domain]).toEqual(['__proto__', 'constructor'])
+    const inherited = Object.create({ inherited: false }) as Record<string, boolean>
+    effective.workspace = workspace(inherited, inherited)
+    expect(openResolver(effective, domain)('inherited')).toBe(true)
+  })
+
+  it.each(['skills', 'mcps'] as const)('honors explicit true and false for special names in %s', (domain) => {
+    const local = JSON.parse('{"constructor":true,"__proto__":false}') as Record<string, boolean>
+    const effective: EffectivePolicy = { global: global(['constructor'], ['constructor']), workspace: workspace(local, local) }
+    const open = openResolver(effective, domain)
+    expect(open('constructor')).toBe(true)
+    expect(open('__proto__')).toBe(false)
+    expect(hiddenNames({ skills: ['constructor', '__proto__'], mcps: ['constructor', '__proto__'] }, effective)[domain]).toEqual(['__proto__'])
+  })
+})
+
 describe('openResolver（单名字取值）', () => {
   it('跟随全局：全局没关的项开着', () => {
     const effective: EffectivePolicy = { global: global(['a']), workspace: workspace() }

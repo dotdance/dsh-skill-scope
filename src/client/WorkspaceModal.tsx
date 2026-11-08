@@ -39,7 +39,8 @@ import styles from './styles.module.css'
  * 会把服务端模块拖进浏览器包。
  */
 function isOpen(value: WorkspaceValue, which: Domain, name: string): boolean {
-  return value.workspace[which][name] ?? isEnabled(value.global[which], name)
+  const local = value.workspace[which]
+  return (Object.hasOwn(local, name) ? local[name] : undefined) ?? isEnabled(value.global[which], name)
 }
 
 /**
@@ -50,7 +51,8 @@ function isOpen(value: WorkspaceValue, which: Domain, name: string): boolean {
  * 表里有键且与全局反向 ⇒ 是差异 ⇒ 标红。
  */
 function isOverridden(value: WorkspaceValue, which: Domain, name: string): boolean {
-  const local = value.workspace[which][name]
+  const map = value.workspace[which]
+  const local = Object.hasOwn(map, name) ? map[name] : undefined
   return local !== undefined && local !== isEnabled(value.global[which], name)
 }
 
@@ -127,9 +129,9 @@ export function WorkspaceModal(props: WorkspaceModalProps): ReactNode {
   const toggle = useCallback(
     (current: WorkspaceValue, which: Domain, name: string, open: boolean): WorkspaceValue | null => {
       const base = isEnabled(current.global[which], name)
-      const next: Record<string, boolean> = { ...current.workspace[which] }
+      // 计算属性会定义自有键；直接 next[name] 赋值会触发 __proto__ setter。
+      const next: Record<string, boolean> = { ...current.workspace[which], [name]: open }
       if (open === base) delete next[name]
-      else next[name] = open
       return { ...current, workspace: { ...current.workspace, [which]: next } }
     },
     [],

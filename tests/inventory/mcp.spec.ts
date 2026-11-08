@@ -45,6 +45,26 @@ describe('serverNameOf', () => {
 })
 
 describe('classifyMcp', () => {
+  it('groups ambiguous names under the longest configured server prefix', () => {
+    const name = 'mcp__foo__bar__lookup'
+    expect(classifyMcp({
+      scopeToolNames: [name], ownToolNames: [name],
+      restrictableNames: new Set([name]), loaderServers: ['foo', 'foo__bar'],
+    })).toEqual([
+      { serverName: 'foo', toolCount: 0, toolNames: [], source: 'global', restrictable: false, loaded: false },
+      { serverName: 'foo__bar', toolCount: 1, toolNames: [name], source: 'scope', restrictable: true, loaded: true },
+    ])
+  })
+
+  it('requires an exact separator boundary and falls back for unknown servers', () => {
+    const rows = classifyMcp({
+      scopeToolNames: ['mcp__foobar__lookup', 'mcp__unknown__nested__lookup'],
+      restrictableNames: new Set(), loaderServers: ['foo'],
+    })
+    expect(rows.map(row => [row.serverName, row.toolCount])).toEqual([
+      ['foo', 0], ['foobar', 1], ['unknown', 1],
+    ])
+  })
   it('marks a server restrictable only when one of its tools is inherited', () => {
     const rows = classifyMcp({
       scopeToolNames: ['mcp__gbrain__search', 'mcp__codegraph__x'],

@@ -15,6 +15,50 @@ const globalPolicy = (skills: string[], mcps: string[] = []): LayerPolicy => ({
   showOfficialSkills: false,
 })
 
+describe('workspace own-key semantics', () => {
+  const names = ['constructor', '__proto__']
+
+  it.each(names)('parses %s as an own boolean key in both domains', (name) => {
+    const text = `{"workspace":{"skills":{"${name}":false},"mcps":{"${name}":true}}}`
+    const { policy } = parseWorkspacePolicy(text)
+    expect(Object.hasOwn(policy.skills, name)).toBe(true)
+    expect(policy.skills[name]).toBe(false)
+    expect(Object.hasOwn(policy.mcps, name)).toBe(true)
+    expect(policy.mcps[name]).toBe(true)
+  })
+
+  it.each(names)('validates %s without losing the own key', (name) => {
+    const result = validateWorkspaceInput(JSON.parse(`{"skills":{"${name}":false},"mcps":{"${name}":true}}`))
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error(result.message)
+    expect(Object.hasOwn(result.policy.skills, name)).toBe(true)
+    expect(result.policy.skills[name]).toBe(false)
+    expect(Object.hasOwn(result.policy.mcps, name)).toBe(true)
+    expect(result.policy.mcps[name]).toBe(true)
+  })
+
+  it.each(names)('migrates legacy %s without losing the own key', (name) => {
+    const { policy } = parseWorkspacePolicy(`{"default":{"skills":["${name}"],"mcps":["${name}"]}}`)
+    expect(Object.hasOwn(policy.skills, name)).toBe(true)
+    expect(policy.skills[name]).toBe(false)
+    expect(Object.hasOwn(policy.mcps, name)).toBe(true)
+    expect(policy.mcps[name]).toBe(false)
+  })
+
+  it('serializes special capability names and preserves arbitrary unknown top-level fields', () => {
+    const policy = JSON.parse('{"skills":{"constructor":false,"__proto__":false},"mcps":{"constructor":true,"__proto__":true}}')
+    const previous = '{"__proto__":{"keep":true},"constructor":{"nested":{"__proto__":"keep"}},"note":[1,{"x":2}]}'
+    const text = serializeWorkspacePolicy(policy, previous, globalPolicy([], names))
+    const written = JSON.parse(text)
+    expect(written.workspace).toEqual(policy)
+    expect(Object.hasOwn(written, '__proto__')).toBe(true)
+    expect(written['__proto__']).toEqual({ keep: true })
+    expect(written['constructor']).toEqual(JSON.parse('{"nested":{"__proto__":"keep"}}'))
+    expect(written.note).toEqual([1, { x: 2 }])
+    expect(parseWorkspacePolicy(text).policy).toEqual(policy)
+  })
+})
+
 describe('parseWorkspacePolicy（新格式）', () => {
   it('空文本按空策略处理，且不带 warning', () => {
     expect(parseWorkspacePolicy(undefined)).toEqual({ policy: EMPTY_WORKSPACE_POLICY })

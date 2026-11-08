@@ -106,12 +106,13 @@ export function usePolicyPanel<TValue>({
   // 卸载后不再 setState；每次 refresh 递增以重新触发加载。
   const alive = useRef(true)
   const [nonce, setNonce] = useState(0)
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    // StrictMode 会重放 setup → cleanup → setup；每次 setup 都恢复当前挂载状态。
+    alive.current = true
+    return () => {
       alive.current = false
-    },
-    [],
-  )
+    }
+  }, [])
 
   const refresh = useCallback(async (): Promise<void> => {
     if (!alive.current) return

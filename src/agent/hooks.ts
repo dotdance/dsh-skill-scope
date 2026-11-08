@@ -114,28 +114,21 @@ async function computeHidden(
   knownServers: ReadonlySet<string>
 } | null> {
   const cwd = cwdOf(agent)
-  // 这里传的是 `agent`（可能是 `asAgentLike` 造的替身，不是宿主本体）。**本处无害**，
-  // 但依赖一条容易失效的性质：`dsh-skill` 的 `collectFresh` 是
-  // `[layers.global, ...chainLayers(options.scope)]`，全局层**永远先并入**，
-  // 所以**名字集合不随 `scope` 变**，变的只有 `invocation` 标记；而 `hiddenNames`
-  // 只吃名字 ⇒ 结果不受影响。实测（3150 实例，两种 scope 各读一次）：
-  //   `[NS] standIn=141 raw=141 onlyStandIn=0 onlyRaw=0 same=true`
-  // 若哪天改成按 `modelInvocable` 判定，这里就必须像复验那样传 `agent.raw`
-  // （对象身份索引，见 `src/agent/skills.ts` 复验段注释）。
-  //
-  // `showOfficialSkills: true` 是**承重**的，不是"顺手取全量"：掩蔽集是
-  // 「清单 − 允许集」反推出来的，清单里没有的名字永远不会被遮蔽。用户在面板上
-  // 打开过「显示官方 Skill」并关掉某条官方 skill 之后，即使把开关关回去，
-  // 那条决定仍然有效——所以这里必须始终按全量清单求值。面板展示口径的过滤
-  // 只发生在路由层（`src/routes/handlers.ts`）。
-  const inventory = await readAgentSkills(deps.skills, agent, cwd ?? '', { showOfficialSkills: true })
+  const scope = agent.raw ?? agent
+  // The hidden set must use the complete inventory, even when official skills are
+  // hidden from the panel; otherwise a saved policy could silently stop applying.
+  const inventory = await readAgentSkills(deps.skills, scope, cwd ?? '', { showOfficialSkills: true })
   if (inventory.complete !== true) {
     deps.logger.warn(
       `dsh-skill-scope: skill 清单不完整（incomplete），本轮不改变收窄状态（agent=${agent.id}）`,
     )
     return null
   }
-  const toolNames = deps.tools.schemas(agent).map((schema) => schema.name)
+  // `schemas(scope)` only contains currently visible tools. After this plugin hides
+  // an MCP server, those tools disappear from that view and the next `tools/change`
+  // pass would incorrectly release the restriction. `restrictableNames` is the
+  // upstream pre-restriction inherited-tool inventory and remains stable.
+  const toolNames = [...deps.tools.view(scope).restrictableNames]
   // loader 行给出的 server 名是**权威命名来源**（用户配了什么就是什么），
   // 用它做最长前缀匹配，避免全靠启发式切分。`loaderServers` 读不到时返回空集，
   // `serverNameOf` 会退化为启发式（见其注释），此时行为与旧版一致。
@@ -179,6 +172,7 @@ async function applyRound(
   isActive: () => boolean = () => true,
 ): Promise<void> {
   const cwd = cwdOf(state.agent) ?? ''
+  const scope = state.agent.raw ?? state.agent
   const chain = serial()
 
   // ── Skill 侧：key 未变则不动（差分维护，不变量 23）。
@@ -205,7 +199,7 @@ async function applyRound(
       verifyStillVisible: true,
       // 复验必须用**宿主本体**当 scope：`dsh-scope` 按对象身份查层，
       // 替身查不到 agent 层。详见 `src/agent/skills.ts` 复验段注释。
-      scopeOf: state.agent.raw ?? state.agent,
+      scopeOf: scope,
       ...(state.skillDispose === null ? {} : { previous: state.skillDispose }),
     })
     if (!isActive()) {
@@ -219,7 +213,7 @@ async function applyRound(
   // ── MCP 侧：隐藏的 server 名展开成可收窄工具名后比较 key。
   // `applyMcpRestriction` **不**接收 `serial`，所以这次必须由本层串行化。
   if (!isActive()) return
-  const restrictable = deps.tools.view(state.agent).restrictableNames
+  const restrictable = deps.tools.view(scope).restrictableNames
   // 与 `computeHidden` 同一个 `knownServers`（本函数由它算出隐藏集后调用），
   // 两边口径必须一致，否则会出现「隐藏集里有这个 server，却展开不出它的工具」。
   const deny = denyFor(toolNames, restrictable, hidden.mcps, knownServers)
@@ -231,7 +225,7 @@ async function applyRound(
         deny,
         key: mcpKey,
         previous: mcpRestrictionOf(state),
-        agent: state.agent,
+        agent: scope,
       }),
     )
     if (!isActive()) {
@@ -378,7 +372,9 @@ export function installAgentHooks(
       return
     }
     const state = deps.states.ensure(agent)
-    await requestAgentApply(state, 'agent/created')
+    // Agent creation must not wait for the potentially large skill-shadow application.
+    // The drain remains serialized and disposal-aware; it completes in the background.
+    void requestAgentApply(state, 'agent/created')
   }
 
   const onDisposed = (value: unknown): void => {
