@@ -14,9 +14,13 @@ import { AgentStates, reground, serial, type AgentLike, type AgentState } from '
  *
  * 关键时序（勿改）：
  * - 收窄动作**只在 `agent/created` 与该会话后续的清单变化时**执行；本层**不挂**
- *   `agent/pre-step` 或 `system-prompt/assemble`。`agent/created` 的 serial 派发已能保证
- *   落地早于该 Agent 首次装配，因此不需要「装配内重建 + 重跑一次装配」那条链，
- *   也不必接管装配瀑布（实测依据见 `docs/dsh-runtime-facts.md` §4）。
+ *   `agent/pre-step` 或 `system-prompt/assemble`。因此不需要「装配内重建 + 重跑一次装配」
+ *   那条链，也不必接管装配瀑布（实测依据见 `docs/dsh-runtime-facts.md` §4）。
+ * - 但这条设计**依赖 `agent/created` 的监听器等到过滤真正落地才返回**：宿主
+ *   `announce()` 会 `await ctx.serial(carrier, 'agent/created', …)`，那个 Promise 是
+ *   「落地早于首次装配」的唯一屏障。提前返回（`void` 掉）会让首个 `agent/pre-step`
+ *   读到**未过滤的完整目录**，随后再收到一份「catalog changed」整份替换——模型上下文里
+ *   于是同时留下大目录与小目录（2026-11-19 竞态复盘）。
  * - 策略**不冻结**：每一次重新落地前都重读全局层与工作区层并重新求值。于是保存的效果
  *   落在**下一个回合边界**——当前回合已经装配完的 schema 不受影响（不变量 18）。
  */
@@ -304,13 +308,20 @@ export function installAgentHooks(
     applying: boolean
     pending: boolean
     disposed: boolean
+    /**
+     * 本轮 drain 的完成信号；`null` 表示没有 drain 在跑。
+     *
+     * 并发的调用方必须共享这个 Promise，否则「已有过滤在跑」时会拿到一个已结算的
+     * Promise 直接返回，而它自己请求的那次过滤还没发生。
+     */
+    inFlight: Promise<void> | null
   }
   let stopped = false
   const applyStates = new Map<string, ApplyState>()
   const applyStateFor = (agentId: string): ApplyState => {
     const existing = applyStates.get(agentId)
     if (existing !== undefined) return existing
-    const created = { applying: false, pending: false, disposed: false }
+    const created: ApplyState = { applying: false, pending: false, disposed: false, inFlight: null }
     applyStates.set(agentId, created)
     return created
   }
@@ -357,7 +368,28 @@ export function installAgentHooks(
     const applyState = applyStateFor(state.agent.id)
     if (stopped || applyState.disposed) return Promise.resolve()
     applyState.pending = true
-    return applyState.applying ? Promise.resolve() : drainAgent(state, applyState, source)
+    const running = applyState.inFlight
+    if (running !== null) return running
+    // 外层 do/while 只兜「同批请求落在 drain 退出判定之后」这个窗口：drainAgent 自带
+    // 同名循环，正常情况下一轮就消费完。`inFlight` 必须在 drain 真正收尾的同一个同步段里
+    // 清空并结算，否则窗口内到达的请求会拿到已结算的 Promise——既不等待过滤完成，
+    // 也把自己的 `pending` 丢掉（2026-11-19 复盘：这就是创建期竞态的第二半）。
+    let settle: () => void = () => {}
+    const flight = new Promise<void>((resolve) => {
+      settle = resolve
+    })
+    applyState.inFlight = flight
+    void (async () => {
+      try {
+        do {
+          await drainAgent(state, applyState, source)
+        } while (applyState.pending && !stopped && !applyState.disposed)
+      } finally {
+        applyState.inFlight = null
+        settle()
+      }
+    })()
+    return flight
   }
 
   const onCreated = async (payload: AgentCreatedPayload): Promise<void> => {
@@ -372,9 +404,9 @@ export function installAgentHooks(
       return
     }
     const state = deps.states.ensure(agent)
-    // Agent creation must not wait for the potentially large skill-shadow application.
-    // The drain remains serialized and disposal-aware; it completes in the background.
-    void requestAgentApply(state, 'agent/created')
+    // 必须等过滤落地：宿主 announce() 会 await 本监听器返回的 Promise。
+    // 提前返回会让首个 agent/pre-step 读到未过滤的完整目录，随后再被整份替换。
+    await requestAgentApply(state, 'agent/created')
   }
 
   const onDisposed = (value: unknown): void => {

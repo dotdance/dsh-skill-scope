@@ -273,16 +273,15 @@ describe('installAgentHooks', () => {
     ])
   })
 
-  it('applies the shadow and the restriction after creation in the background', async () => {
+  it('applies the shadow and the restriction at creation, before the first assembly', async () => {
     const ctx = makeFakeCtx() as unknown as Context & FakeContext
     const harness = makeHarness({
       workspace: { skills: { demo: false }, mcps: {} },
     })
     installAgentHooks(ctx, harness.deps)
     await fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })
-    await vi.waitFor(() => expect(harness.shadowCalls).toContain('demo'))
 
-    // 工作区层关掉 demo ⇒ demo 被遮蔽。
+    // `agent/created` 返回即代表落地完成，不需要再等后台收敛。
     expect(harness.shadowCalls).toContain('demo')
     // 遮蔽确实**生效**了（而不是只发起了注册）：快照里 demo 的 mi 已变 false。
     expect(harness.shadowed.has('demo')).toBe(true)
@@ -443,7 +442,11 @@ describe('installAgentHooks', () => {
     expect(maxActiveRegisters).toBe(1)
   })
 
-  it('returns from agent creation before a slow background application completes', async () => {
+  // 验收：`agent/created` 必须等到过滤真正落地才返回。宿主侧 `announce()` 会
+  // `await ctx.serial(carrier, 'agent/created', …)`，那个 Promise 就是「落地早于首次装配」的
+  // 屏障；本用例与之等价——创建完成时 shadow 已经注册，宿主首个 `agent/pre-step` 读到的
+  // 目录只会是过滤后的那一份，不会先看到全量再被整份替换。
+  it('waits for the shadow to land before agent creation returns', async () => {
     const ctx = makeFakeCtx() as unknown as Context & FakeContext
     const harness = makeHarness({ globalSkills: ['demo', 'other'], agentSkills: ['demo', 'other'] })
     let releaseSnapshot!: () => void
@@ -462,21 +465,58 @@ describe('installAgentHooks', () => {
     }
     const hooks = installAgentHooks(ctx, harness.deps)
     try {
+      // 策略要在创建期就被读到：阻塞点在清单读取，求值已经发生过。
+      harness.state.workspace = { skills: { other: false }, mcps: {} }
       let createdFinished = false
       const created = fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })
         .then(() => { createdFinished = true })
       await started
-      await vi.waitFor(() => expect(createdFinished).toBe(true))
-      harness.state.workspace = { skills: { other: false }, mcps: {} }
-      await expect(hooks.reapply()).resolves.toBeUndefined()
-      expect(snapshotCalls).toBe(1)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(createdFinished).toBe(false)
       expect(harness.shadowCalls).toEqual([])
       releaseSnapshot()
-      await vi.waitFor(() => {
-        expect(harness.shadowCalls).toEqual(['other'])
-        expect(harness.states.get('a1')?.policy?.workspace).toEqual({ skills: { other: false }, mcps: {} })
-      })
       await created
+      expect(createdFinished).toBe(true)
+      expect(harness.shadowCalls).toEqual(['other'])
+      expect(harness.states.get('a1')?.policy?.workspace).toEqual({ skills: { other: false }, mcps: {} })
+    } finally {
+      releaseSnapshot()
+      hooks.stopAll()
+    }
+  })
+
+  // 重入分支：已有过滤在跑时 `requestAgentApply` 必须共享那份 in-flight 结果。
+  // 旧实现直接 `Promise.resolve()`，调用方以为自己等过了，实际它的请求还没发生。
+  it('shares the in-flight application with a concurrent request instead of resolving early', async () => {
+    const ctx = makeFakeCtx() as unknown as Context & FakeContext
+    const harness = makeHarness({ globalSkills: ['demo', 'other'], agentSkills: ['demo', 'other'] })
+    let releaseSnapshot!: () => void
+    let snapshotStarted!: () => void
+    const started = new Promise<void>((resolve) => { snapshotStarted = resolve })
+    const blocked = new Promise<void>((resolve) => { releaseSnapshot = resolve })
+    let blockedOnce = false
+    const baseSnapshot = harness.deps.skills.snapshot
+    harness.deps.skills.snapshot = async (call: { cwd?: string; scope?: unknown }) => {
+      if (!blockedOnce) {
+        blockedOnce = true
+        snapshotStarted()
+        await blocked
+      }
+      return await baseSnapshot(call)
+    }
+    harness.state.workspace = { skills: { other: false }, mcps: {} }
+    const hooks = installAgentHooks(ctx, harness.deps)
+    try {
+      const created = fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })
+      await started
+      let secondFinished = false
+      const second = hooks.reapply().then(() => { secondFinished = true })
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(secondFinished).toBe(false)
+      releaseSnapshot()
+      await Promise.all([created, second])
+      expect(secondFinished).toBe(true)
+      expect(harness.shadowCalls).toEqual(['other'])
     } finally {
       releaseSnapshot()
       hooks.stopAll()

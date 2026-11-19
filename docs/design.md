@@ -201,7 +201,7 @@ isOpen(name) = 工程层表里有 name ? 表里的值 : 全局是否启用(name)
 
 **为什么不用「会话内锁定」**：锁定规则的前提是「空白会话没有 live Agent」，而探针 9 证伪了它 —— `session.create` 时就已建 Agent，`agents.list()` 又能枚举活跃 Agent。前提一坏，锁定就产生自相矛盾的后果：**§7.2 的主用法（在空白会话的 chip 里改本工程策略）反而对它自己那个会话不生效**，因为该会话的 Agent 早在用户编辑之前就创建并冻结了。因此改为「回合边界生效」。**保留下来的实质是「回合内稳定」**：正在生成的这一回合不受影响，避免模型看到的工具列表在本回合中途改变。
 
-**为什么挂在 `agent/created`**：不挂在 `system-prompt/assemble` 上，因为「只有装配上下文才拿得到 `cwd`」这个理由不成立 —— `cwd` 早已由 `agent.session.header.cwd` 在事件派发前快照（`dsh-agent/lib/types/index.d.ts:47-58`），另有 `ctx.workingDirectory.ensure(agent, signal)` 可用。选 `agent/created` 的决定性原因是**它能保证注册面早于该 Agent 的第一次装配**：该事件是 serial 派发、监听器被逐个 `await`（`dsh-agent/lib/index.js:579`），因此 5.2/5.3 的 shadow 与 restriction 都能在首次装配之前落地，不需要装配瀑布、不需要重跑。代价是这里的监听器**绝不许抛错**（`api-catalog.js` 事件描述：会让会话创建失败），所以一律 fail-open。
+**为什么挂在 `agent/created`**：不挂在 `system-prompt/assemble` 上，因为「只有装配上下文才拿得到 `cwd`」这个理由不成立 —— `cwd` 早已由 `agent.session.header.cwd` 在事件派发前快照（`dsh-agent/lib/types/index.d.ts:47-58`），另有 `ctx.workingDirectory.ensure(agent, signal)` 可用。选 `agent/created` 的决定性原因是**它能保证注册面早于该 Agent 的第一次装配**：该事件是 serial 派发、监听器被逐个 `await`（`dsh-agent/lib/index.js:579`），因此 5.2/5.3 的 shadow 与 restriction 都能在首次装配之前落地，不需要装配瀑布、不需要重跑。这个保证**有前提**：监听器必须 `await` 落地本身，不能在启动 drain 之后提前返回（见 5.3 的「创建期屏障」）。代价是这里的监听器**绝不许抛错**（`api-catalog.js` 事件描述：会让会话创建失败），所以一律 fail-open。
 
 | 场景 | 结果 |
 | --- | --- |
@@ -210,7 +210,7 @@ isOpen(name) = 工程层表里有 name ? 表里的值 : 全局是否启用(name)
 | 在运行中的会话里打开全局面板改全局策略 | 同上一行（全局策略是各会话下一次重读时的输入）；另影响此后新建的会话 |
 | 会话进行中清单发生变化（provider 失效、文件增删、MCP 连接完成） | 策略快照不变，但**隐藏集按当前清单重算**；新出现的、名字在快照关闭集里的 Skill 会被补上 shadow |
 
-**没有任何东西被冻结**：每次触发都重读策略与清单。被固定的是**回合内稳定** —— 一次装配用同一份策略与同一份清单算隐藏集，回合中途不重算（见 5.3）。策略变化由保存驱动，保存成功后调用 reapply；该调用只负责排队一次重新求值。若同一 Agent 已有落地操作在进行，后续请求会合并为 pending，并在当前 drain 结束后按最新策略尝试收敛；触发事件的 Promise 可以在后台 drain 完成前先 resolve。因而“写盘成功”不等于“shadow/restriction 已在当前时刻完成”，但后续回合装配使用的是最终收敛结果。该异步窗口是现有 fail-open/串行队列契约，不能改成同步等待。
+**没有任何东西被冻结**：每次触发都重读策略与清单。被固定的是**回合内稳定** —— 一次装配用同一份策略与同一份清单算隐藏集，回合中途不重算（见 5.3）。策略变化由保存驱动，保存成功后调用 reapply；该调用只负责排队一次重新求值。若同一 Agent 已有落地操作在进行，后续请求不会另起一轮，而是**共享那一轮的 in-flight Promise**，因此调用方等到的是「本轮 drain 真正结束」，不是「请求已入队」。后台 drain 仍按 per-Agent serial 队列收敛，`pending` 只用来标记「本轮之后还有新请求」。由此：`agent/created` 返回时 shadow/restriction 已落地（首个装配即按策略执行）；`reapply` 返回时本轮已收敛，但期间新到的请求可能还留了一轮。该等待是**必需**的——早期把它改成 `void` 后，宿主会在过滤落地前完成会话创建，首个 `agent/pre-step` 读到未过滤的完整目录，随后再收到一份整份替换的目录（2026-11-19 复盘，见 5.3 的「创建期屏障」）。
 
 
 该语义必须在 UI 上显式表达（见 7.3）。两条读路由**不返回**任何会话状态字段：没有 UI 读它们（7.3 的文案只讲「保存后何时生效」，不随会话状态变化）。
@@ -378,6 +378,7 @@ isOpen(name) = 工程层表里有 name ? 表里的值 : 全局是否启用(name)
   - MCP 侧为什么不需要 assemble：见 5.2 的挂点论证。
   - 两侧都从事件载荷拿到 Agent，`cwd` 取 `agent.session.header.cwd`（`dsh-agent/lib/types/index.d.ts:47-58` 保证会话建立时已快照）。
 - **首次落地点 = `agent/created`**：在这里把两级策略（3.7）算成隐藏集并落地；此后每次策略保存都对**活跃 Agent 重新落地**，自下一回合装配起生效。
+  - **创建期屏障（2026-11-19 修复，勿再改成 `void`）**：`onCreated` 必须 `await requestAgentApply(state, 'agent/created')`。宿主 `dsh-agent` 的 `announce()` 是 `await ctx.serial(carrier, 'agent/created', …)`，监听器返回的 Promise 就是「落地早于首次装配」的唯一屏障。改成 `void` 之后实测出现：会话创建立即放行 → 宿主首个 `agent/pre-step` 读到**未过滤的完整目录**（150 条）→ 后台过滤落地 → 宿主发现 digest 变化，再注入一份整份替换的目录（7 条）。模型上下文里于是同时留下两份互相矛盾的清单，且第一回合实际可调用的范围是错的。真实会话记录里 34 个会话出现过这种「≥100 条 → ≤20 条」的跳变，13 个会话首条目录即全量。
   - 早期版本写的「不能挂 `agent/created`（那时 cwd 与冻结策略尚未就绪）」是错的：cwd 已由 `agent.session.header.cwd` 在事件派发前快照，策略文件本来就是外部同步可读状态。
   - 空白会话（7.2 的主用法）**已有 live Agent**：`session.create` 时就建 Agent，所以不能在 `agent/created` 之后就把策略当成不可变 —— 那样 chip 里保存的策略对它自己那个会话不生效。改为「保存即重新落地」后，空白会话的**首个回合**即按新策略装配。
   - 落地的对象是**活跃 Agent 的枚举结果**（`agents.list()`，`dsh-agent/lib/types/index.d.ts:357`）；子 Agent 是否也算「同会话」需按 `roots()` 或 `isOwnedBy` 过滤，这一点**尚未实测**（见 11 节）。
@@ -388,7 +389,7 @@ isOpen(name) = 工程层表里有 name ? 表里的值 : 全局是否启用(name)
 - 复验：Skill 侧在注册后用一次 `snapshot({ scope: agent, cwd })` 复验（生产路径传 `verifyStillVisible: true`）；若仍有被禁 Skill 可见，则**记 warning 并保留其余生效项**，不回滚、不抛错。早先的「回滚 + 抛 `dsh-skill-scope: failed to hide skill \"<name>\"`（fail-closed）」设计已废弃：它要求抛错只出现在**非 `agent/created`** 的路径上（见 5.2 的 fail-open 硬约束），而落地路径无法可靠区分，抛错落到 `onCreated` 的 catch 就会 fail-open ⇒ 一个 Skill 都关不上。
 - 清单不完整（`snapshot().complete === false`，例如 watcher 启动失败）时，**不改变**当前生效状态，并记录警告；不把「不完整」当成「已关闭」。
 - teardown：插件卸载时 `ctx.effect` 注销 `skills/change` / `tools/change` 订阅并清掉全部 Agent 状态；每个 Agent 结束时 `agent/disposed` 释放它的 shadow 与 restriction；disposer 调用统一包 `try/catch`，失败只记日志。
-- 并发：插件内所有 Skill registry 操作、`restrict` 调用与策略文件读改写走同一条 promise 链；跨进程的读-改-写由 `withFileLock` 兜（见 3.6）。
+- 并发：插件内所有 Skill registry 操作、`restrict` 调用与策略文件读改写走同一条 promise 链；跨进程的读-改-写由 `withFileLock` 兜（见 3.6）。**请求合并**用 per-Agent 的 `inFlight: Promise | null`：已有 drain 在跑时，调用方共享同一个 Promise（等的是「本轮真正结束」），`pending` 只标记「本轮结束后还要再来一轮」。早期实现直接 `Promise.resolve()` 提前返回，等于告诉调用方「等过了」，而它请求的那次过滤还没发生——这是创建期竞态的另一半。
 
 ---
 

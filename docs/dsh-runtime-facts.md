@@ -142,6 +142,10 @@ agent/created → system-prompt/assemble → agent/pre-step
 因此**在该事件里落地收窄，该 Agent 的第一次装配就不含被禁工具**；挪到 `agent/pre-step` 只能影响下一次
 装配（实测：`agent/created` 臂首次装配 24 个工具且不含被拒工具，`agent/pre-step` 臂为 25 个且含它）。
 
+**但「早于首次装配」只在监听器自己不提前返回时成立**：屏障是 `announce()` 里那个 `await`，
+监听器一旦 `void` 掉自己的落地 Promise，会话创建立刻放行，首个 `agent/pre-step` 读到的技能目录就是
+**未过滤的全量**（实测 150 条），后台过滤落地后宿主再按 digest 变化注入一份整份替换（7 条）。
+
 代价：这里的监听器**绝不许抛错**（`api-catalog.js` 事件描述：会让会话创建失败），一律 fail-open。
 
 ### waterfall 事件必须 `next()` 透传
