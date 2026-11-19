@@ -30,13 +30,37 @@ function hostServices(extra: Record<string, unknown> = {}): Record<string, unkno
   }
 }
 
-/** 一个记录 `path` 的 connection.fetch 替身。 */
+/** 一个记录 `path` 的 connection.fetch 替身；`dispose` 由调用方决定。 */
 function recordingConnection(registered: string[], dispose: () => Promise<void> = async () => {}): Record<string, unknown> {
   return {
     fetch: {
       register: (spec: { path: string }) => {
         registered.push(spec.path)
         return dispose
+      },
+    },
+  }
+}
+
+/**
+ * **每条路由一个独立句柄**的 connection 替身：每次被调用都把 path 记进 `handled`。
+ *
+ * 为什么需要它：`recordingConnection` 让 4 条路由共用同一个 `dispose`，
+ * `toHaveBeenCalledTimes(4)` 于是无法区分「4 条各自释放一次」与「同一条释放 4 次」，
+ * 也发现不了解放错对象。要断言「每条路由各自被释放」，句柄必须一一对应。
+ *
+ * **故意不幂等**：宿主真实的 disposer 是幂等的，但替身若也去重，「重复 dispose 不重复
+ * 释放」这条断言就变成替身自己的性质、而不是 `src/assembly.ts` 里 `released` 守卫的性质
+ * （实测：替身自带去重时，删掉 `released` 守卫用例仍然全绿）。去重是**被测方**的责任。
+ */
+function perRouteConnection(registered: string[], handled: string[]): Record<string, unknown> {
+  return {
+    fetch: {
+      register: (spec: { path: string }) => {
+        registered.push(spec.path)
+        return async () => {
+          handled.push(spec.path)
+        }
       },
     },
   }
@@ -60,13 +84,137 @@ describe('assemble：路由接线', () => {
 
   it('releases every route through disposeRoutes', async () => {
     const registered: string[] = []
-    const dispose = vi.fn()
-    const ctx = makeFakeCtx(hostServices({ connection: recordingConnection(registered, dispose) }))
+    const handled: string[] = []
+    const ctx = makeFakeCtx(hostServices({ connection: perRouteConnection(registered, handled) }))
 
     const assembly = assemble(ctx as unknown as AssemblyContext)
     await expect(assembly.disposeRoutes()).resolves.toBeUndefined()
 
-    expect(dispose).toHaveBeenCalledTimes(4)
+    // 逐条释放，且每条恰好一次（用共用句柄只能数次数，见 `perRouteConnection` 的注释）。
+    expect([...handled].sort()).toEqual([...registered].sort())
+    expect(handled).toHaveLength(4)
+
+    // 幂等：再调两次不得再碰宿主句柄（替身**不**替我们做去重）。
+    //
+    // 这条守的是**不变量**，两层各自实现：`src/assembly.ts:310-315` 的 `released` 与
+    // `src/routes/register.ts:132-135` 的 `cleanup`。所以单删任一层仍然绿（实测），
+    // 两层一起去掉才红 —— 断言不再是替身自带的性质，但也不是单层的信号。
+    await assembly.disposeRoutes()
+    await assembly.disposeRoutes()
+    expect(handled).toHaveLength(4)
+
+    // 注入回调与注册链路都没抛：cordis 会把它吞进 `_error`，单测里只有替身这条通道
+    // 能看见（否则「注册抛错」会表现成「路由少了」而不是失败）。
+    expect(ctx.errors).toEqual([])
+  })
+
+  /*
+   * 真实时序下的释放：`ctx.inject` 的回调在微任务里才跑（cordis `Fiber._reload()` 首句
+   * `await Promise.resolve()`），所以 `assemble()` 同步返回时路由**还没注册**。
+   *
+   * 交出去的必须是**转发函数**而不是那个 `let` 的值。交值就等于永久交出初始的 no-op：
+   * 卸载不释放路由 → 重载时同 path 二次注册被宿主拒绝 → 新实例一条路由都没有，
+   * 面板整片 404 到重启。上面那条用例走的是同步 `inject` 替身，恰好照不出这个缺陷，
+   * 所以这里必须显式打开 `deferInject`。
+   */
+  it('releases routes that only register on a later microtask', async () => {
+    const registered: string[] = []
+    const handled: string[] = []
+    const ctx = makeFakeCtx(hostServices({ connection: perRouteConnection(registered, handled) }), {
+      deferInject: true,
+    })
+
+    const assembly = assemble(ctx as unknown as AssemblyContext)
+    // 同步返回点：inject 回调还没跑，一条路由都没注册。
+    expect(registered).toEqual([])
+
+    await Promise.resolve()
+    expect(registered).toHaveLength(4)
+
+    await assembly.disposeRoutes()
+    expect(handled).toHaveLength(4)
+  })
+
+  /*
+   * 服务 churn：cordis 在 `connection` 被移除又提供时会**重跑** `inject` 回调，并先调用
+   * 上一次回调**返回的** disposer（`Fiber._reload()`，真 cordis 探针实测：
+   * `RERUN_LOG = [callback, ---remove---, dispose, ---reprovide---, callback]`）。
+   *
+   * 回调不 return disposer 的话，本插件没有任何机会在 churn 时收手：同 path 二次注册，
+   * 宿主 webserver 直接抛 `webserver: duplicate exact route`（`dsh-host-webserver/lib/index.js:375`）。
+   * 这里直接调替身收下的句柄模拟 cordis 的自动释放，并顺带钉住幂等。
+   */
+  it('hands cordis a disposer so service churn cannot double-register', async () => {
+    const registered: string[] = []
+    const handled: string[] = []
+    const ctx = makeFakeCtx(hostServices({ connection: perRouteConnection(registered, handled) }), {
+      deferInject: true,
+    })
+
+    const assembly = assemble(ctx as unknown as AssemblyContext)
+    await Promise.resolve()
+    expect(registered).toHaveLength(4)
+    expect(ctx.injectDisposers).toHaveLength(1)
+
+    // 模拟 cordis：churn 时先调回调返回的 disposer。
+    await ctx.injectDisposers[0]?.()
+    expect(handled).toHaveLength(4)
+    // 幂等：cordis 的自动调用与 `disposeRoutes` 可能撞在同一次卸载上。
+    await ctx.injectDisposers[0]?.()
+    await assembly.disposeRoutes()
+    expect(handled).toHaveLength(4)
+  })
+
+  /*
+   * churn 之后 `disposeRoutes` 必须指向**新闭包**。
+   *
+   * 这条守的是 `src/assembly.ts` 里 `let released = false` 的**作用域**：它必须留在回调
+   * 体内（每次重跑一个新闭包）。一旦有人把它提到 `assemble` 作用域或模块作用域，
+   * 语义立刻变成「第一次释放后永久 no-op」——churn 后新注册的 4 条路由永远释放不掉，
+   * 宿主重复路由抛错、面板 404。实测把 `released` 外提后，本文件其它用例仍全绿，
+   * 只有这一条会红。
+   */
+  it('survives a connection churn and still releases the routes the new callback registered', async () => {
+    const registered: string[] = []
+    const handled: string[] = []
+    const ctx = makeFakeCtx(hostServices({ connection: perRouteConnection(registered, handled) }))
+
+    const assembly = assemble(ctx as unknown as AssemblyContext)
+    expect(registered).toHaveLength(4)
+    expect(handled).toEqual([])
+
+    // churn：宿主先调旧 disposer，再重跑回调（`_unload` → `_reload`）。
+    ctx.churn(['connection'])
+    expect(handled).toHaveLength(4)
+    expect(registered).toHaveLength(8)
+
+    // 释放的必须是**新一轮**注册的那 4 条。
+    await assembly.disposeRoutes()
+    expect(handled).toHaveLength(8)
+    expect(handled.slice(4).sort()).toEqual([...registered.slice(4)].sort())
+  })
+
+  /*
+   * `inject` 的第一条契约：**依赖不齐就不执行**。
+   *
+   * 生产上把 `ctx.inject(['connection'], …)` 的服务名写错一个字母，回调永不执行、4 条路由
+   * 静默缺失（面板打开看到的是宿主的 404 body），日志一行没有。替身原来无视 `names`
+   * 无条件执行，这个缺陷在单测里永远照不出来。
+   */
+  it('keeps the routes pending until the declared service shows up', async () => {
+    const registered: string[] = []
+    const ctx = makeFakeCtx(hostServices())
+
+    const assembly = assemble(ctx as unknown as AssemblyContext)
+    expect(registered).toEqual([])
+    expect(ctx.pendingInjects).toHaveLength(1)
+
+    // 宿主在装配之后才提供 connection：依赖齐了，回调才跑。
+    ctx.provide('connection', perRouteConnection(registered, []))
+    expect(registered).toHaveLength(4)
+    expect(ctx.pendingInjects).toEqual([])
+
+    await assembly.disposeRoutes()
   })
 })
 

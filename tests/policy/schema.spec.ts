@@ -36,6 +36,98 @@ describe('normalizePolicy（宽松读）', () => {
     const many = Array.from({ length: 513 }, (_, i) => `s${i}`)
     expect(validatePolicyInput({ mode: 'blacklist', skills: many, mcps: [] }).ok).toBe(false)
   })
+
+  /*
+   * 元素级丢弃：`z.array(...).catch([])` 的 `.catch` 挂在**数组**上，一个坏名字会让
+   * 整份名单归零（实测 `{"skills":["good-one","Bad Name"]}` → `skills: []`），512 条
+   * 有效关闭项一起被放开，而面板与日志都看不见。下面几条钉住逐元素过滤。
+   */
+  it('drops only the malformed name instead of voiding the whole list', () => {
+    const r = normalizePolicy({ mode: 'blacklist', skills: ['good-one', 'Bad Name'], mcps: [] }, 'blacklist')
+    expect(r.policy.skills).toEqual(['good-one'])
+    expect(r.warning).toContain('Bad Name')
+  })
+
+  it('keeps valid names when a non-string element appears', () => {
+    const r = normalizePolicy({ mode: 'blacklist', skills: ['keep', 1, null], mcps: [] }, 'blacklist')
+    expect(r.policy.skills).toEqual(['keep'])
+    expect(r.warning).toContain('不合法 skill')
+  })
+
+  it('never throws on an element JSON cannot describe, and previews its type', () => {
+    // `JSON.stringify(1n)` 抛 TypeError；`normalizePolicy` 的契约是永不抛错。
+    const r = normalizePolicy({ mode: 'blacklist', skills: ['ok-name', 1n], mcps: [] }, 'blacklist')
+    expect(r.policy.skills).toEqual(['ok-name'])
+    expect(r.warning).toContain('[bigint]')
+  })
+
+  it('names each list separately and truncates a huge offending value', () => {
+    const mixed = normalizePolicy({ mode: 'blacklist', skills: ['Bad Name'], mcps: ['x y'] }, 'blacklist')
+    expect(mixed.warning).toContain('不合法 skill')
+    expect(mixed.warning).toContain('不合法 mcp')
+
+    const huge = normalizePolicy({ mode: 'blacklist', skills: ['A'.repeat(60000)], mcps: [] }, 'blacklist')
+    expect((huge.warning ?? '').length).toBeLessThan(200)
+    expect(huge.warning).toContain('…')
+  })
+
+  /*
+   * 数量上限本身也是同一条缺陷的边界形态：`.max(MAX_NAMES)` 曾挂在 zod 上，
+   * 在元素过滤**之前**跑，「512 条合法 + 1 条 junk = 513」会先被判超限、由整份
+   * `.catch()` 清空 ⇒ 512 条有效关闭项照旧全失效。下面两条钉住「按过滤后的有效名字判」。
+   */
+  it('keeps 512 valid names when the 513th element is junk', () => {
+    const many = Array.from({ length: 512 }, (_, i) => `s${i}`)
+    const r = normalizePolicy({ mode: 'blacklist', skills: [...many, 'Bad Name'], mcps: [] }, 'blacklist')
+    expect(r.policy.skills).toHaveLength(512)
+    expect(r.warning).toContain('Bad Name')
+    expect(r.warning).not.toContain('超过上限')
+  })
+
+  it('voids a list only when its valid names exceed the cap, and says so', () => {
+    const many = Array.from({ length: 513 }, (_, i) => `s${i}`)
+    const r = normalizePolicy({ mode: 'blacklist', skills: many, mcps: [] }, 'blacklist')
+    expect(r.policy.skills).toEqual([])
+    expect(r.warning).toContain('超过上限')
+    expect(r.warning).toContain('513')
+  })
+
+  it('does not let duplicates eat the budget', () => {
+    const many = Array.from({ length: 600 }, (_, i) => `s${i % 512}`)
+    const r = normalizePolicy({ mode: 'blacklist', skills: many, mcps: [] }, 'blacklist')
+    expect(r.policy.skills).toHaveLength(512)
+    expect(r.warning).toBeUndefined()
+  })
+
+  it('reports a whole-field drop when the value is not an array at all', () => {
+    const r = normalizePolicy({ mode: 'blacklist', skills: 'good-one', mcps: [] }, 'blacklist')
+    expect(r.policy.skills).toEqual([])
+    expect(r.warning).toContain('已忽略字段：skills')
+  })
+
+  it('stays silent when the only anomaly is a duplicate name', () => {
+    // 曾把「只有重复项」误报成「已忽略字段：skills」，用户会以为整份名单失效。
+    const r = normalizePolicy({ mode: 'blacklist', skills: ['a', 'a'], mcps: [] }, 'blacklist')
+    expect(r.policy.skills).toEqual(['a'])
+    expect(r.warning).toBeUndefined()
+  })
+
+  it('renders non-finite numbers literally instead of null', () => {
+    // `JSON.stringify(NaN)` 与 `JSON.stringify(Infinity)` 都是 `"null"`，两条不同的
+    // 坏值会渲染成同一条，日志里分不清用户写了什么。
+    const r = normalizePolicy({ mode: 'blacklist', skills: [Number.NaN, Number.POSITIVE_INFINITY], mcps: [] }, 'blacklist')
+    expect(r.warning).toContain('NaN')
+    expect(r.warning).toContain('Infinity')
+    expect(r.warning).not.toContain('null')
+  })
+
+  it('never splits a surrogate pair when truncating', () => {
+    const r = normalizePolicy({ mode: 'blacklist', skills: ['😀'.repeat(30)], mcps: [] }, 'blacklist')
+    const warning = r.warning ?? ''
+    // 孤立代理（U+D800–U+DFFF 单独出现）会在日志里显示成方块：截断必须按码点。
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(warning)).toBe(false)
+    expect(warning).toContain('…')
+  })
 })
 
 /**

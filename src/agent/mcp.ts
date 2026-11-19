@@ -4,9 +4,15 @@ import { serverNameOf } from '../inventory/mcp.ts'
  * 收窄面：`restrict` 按**该 Agent 的作用域**加一层工具掩码，返回释放函数。
  * 只声明 `deny`（本插件从不使用 `allow`），保持接口最小。
  *
- * `agent` 与 `ScopedSkillsFace.register` 同理是**必需的第二实参**：`tools.restrict()`
- * 的生效层由被调用实例的 ctx 决定，真实装配传入的代理按 agent 惰性解析
- * `agent.ctx.get('tools')`。替身可忽略该参数。
+ * 第二个实参 `agent` 是**本插件自己加的**，不是宿主签名的一部分：
+ * 宿主是 `tools.restrict(filter)`，生效层由被调用实例的 `ctx` 决定
+ * （`dsh-tools` 的 `restrict(filter)` 只收一个参数）。这里多出来的 `agent` 由
+ * `src/assembly.ts` 的 `makeScopedService` 消费——它拿 `agent.ctx.get('tools')`
+ * 取**该 Agent 作用域**的实例再调 `restrict`，所以真正的参数解析发生在包装层。
+ *
+ * 因此 `agent` 保持可选只是为了让测试替身能忽略它；**生产调用点必须传**
+ * （`src/agent/hooks.ts` 传的是 `scope`）。省略时 `readScopedService` 取不到
+ * `agent.ctx`，`makeScopedService` 打一条 warn 并返回 no-op 句柄 —— 掩码整段不生效。
  */
 export interface ScopedToolsFace {
   restrict(filter: { deny: string[] }, agent?: unknown): () => void
@@ -71,14 +77,50 @@ export async function applyMcpRestriction(input: {
   deny: readonly string[]
   key: string
   previous: RestrictionState | null
-  /** 决定生效作用域的 Agent；真实代理靠它取 `agent.ctx.get('tools')`。替身可忽略。 */
+  /**
+   * 决定生效作用域的 Agent：装配层靠它取 `agent.ctx.get('tools')`（见 `ScopedToolsFace`）。
+   * 生产调用点必传；测试替身可省略。
+   */
   agent?: unknown
+  /** 旧句柄释放失败的上报口（见 `releasePrevious`）。省略时静默吞掉。 */
+  onReleaseError?: (error: unknown) => void
 }): Promise<RestrictionState | null> {
   if (input.previous !== null && input.previous.key === input.key) {
     return input.previous
   }
-  input.previous?.release()
-  if (input.deny.length === 0) return null
+  if (input.deny.length === 0) {
+    releasePrevious(input)
+    return null
+  }
+  /*
+   * **先注册新的、再释放旧的**（顺序承重）。反过来的话，`restrict()` 抛错（它对未知
+   * 工具名一律抛，见 `dsh-tools` 的 `restrict()`）时旧限制已经解除 —— 被禁工具立刻
+   * 全部重新可见，而 `state.mcpKey` 仍是旧值、`mcpDispose` 仍指向**已释放**的句柄；
+   * 下一轮若算出的 key 与旧 key 相同，`previous.key === key` 会直接复用这个死句柄，
+   * 该 server 此后再也不会被禁。restriction 是「相交」语义，先叠一层再撤旧的等价。
+   */
   const release = input.tools.restrict({ deny: [...input.deny] }, input.agent)
+  releasePrevious(input)
   return { key: input.key, release }
+}
+
+/**
+ * 释放旧句柄，**失败只上报、不抛**。
+ *
+ * `release()` 会同步 emit `tools/change`（`ScopedLayers` 的 undo 里调 `onChange()`），
+ * 若某个监听器在 emit 时抛错，异常会从 `release()` 里冒出来。裸调用的话：新层已挂上、
+ * 旧层已撤、`applyMcpRestriction` 却抛错 ⇒ `applyRound` 不更新 `state.mcpKey` 与
+ * `mcpDispose`，状态仍指着**已死**的旧句柄 —— 这正是「先注册后释放」要消灭的那个状态，
+ * 从释放这一侧重新进来。仓内 `releaseOne`（`src/agent/hooks.ts`）用的是同一口径。
+ */
+function releasePrevious(input: {
+  previous: RestrictionState | null
+  onReleaseError?: (error: unknown) => void
+}): void {
+  if (input.previous === null) return
+  try {
+    input.previous.release()
+  } catch (error) {
+    input.onReleaseError?.(error)
+  }
 }

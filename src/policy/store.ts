@@ -116,6 +116,8 @@ export class PolicyStore {
   private readonly fs: PolicyFsLike
   private readonly lock: LockLike
   private readonly logger: { warn(message: string): void }
+  /** 上一次已上报的全局警告指纹（`revision + warning`），见 `reportGlobalWarning`。 */
+  private reportedGlobalWarning = ''
   /** 按路径串行化的队列尾。每个写入者的 promise 接在上一个之后。 */
   private readonly queues = new Map<string, Promise<unknown>>()
 
@@ -129,8 +131,27 @@ export class PolicyStore {
     const path = globalPolicyPath()
     const text = await this.readText(path)
     if (text === null) return { policy: EMPTY_POLICY, revision: null, exists: false }
+    const revision = sha256Hex(text)
     const { policy, warning } = parseGlobalPolicy(text)
-    return { policy, revision: sha256Hex(text), exists: true, ...(warning === undefined ? {} : { warning }) }
+    if (warning !== undefined) this.reportGlobalWarning(path, revision, warning)
+    return { policy, revision, exists: true, ...(warning === undefined ? {} : { warning }) }
+  }
+
+  /**
+   * 把全局文件的解析警告**就地**记一条日志。
+   *
+   * 为什么不在调用方记：`loadGlobal` 有三个消费方——面板的 `readGlobalValue`、
+   * 工作区视图的 `buildWorkspaceView`、以及真正的执行路径 `agent/hooks` 的 `evaluate`。
+   * 只在路由层记的话，「用户从不打开面板」时坏策略**一行日志都没有**（skill 悄悄失效、
+   * 用户无从查起）；分别记则每次 `agent/created` 都刷一条。
+   * 在唯一的数据源处记、并按 `revision + warning` 去重，三种情形一并解决：
+   * 内容不变只记一次，文件一改立刻再记一次。
+   */
+  private reportGlobalWarning(path: string, revision: string, warning: string): void {
+    const stamp = `${revision}\n${warning}`
+    if (stamp === this.reportedGlobalWarning) return
+    this.reportedGlobalWarning = stamp
+    this.logger.warn(`dsh-skill-scope: 全局策略文件（${path}）：${warning}`)
   }
 
   async saveGlobal(policy: LayerPolicy, expected: string | null | undefined): Promise<SaveOutcome> {

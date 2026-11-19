@@ -126,6 +126,37 @@ describe('PolicyStore', () => {
     expect(files.get(globalPolicyPath())).toBe('{ not json')
   })
 
+  /*
+   * 全局文件的解析警告必须在**唯一的数据源**处落日志：`loadGlobal` 有三个消费方
+   * （面板 `readGlobalValue`、工作区视图、执行路径 `hooks.evaluate`），只在路由层记
+   * 就意味着「用户从不打开面板」时坏策略一行日志都没有。
+   * 同时按 `revision + warning` 去重：`agent/created` 会反复读同一份文件。
+   */
+  it('reports the global parse warning once per revision', async () => {
+    const broken = '{ "skills": ["a", "Bad Name"] }'
+    const { store, warnings, files } = makeStore({ [globalPolicyPath()]: broken })
+    const first = await store.loadGlobal()
+    expect(first.warning).toBeTruthy()
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain(globalPolicyPath())
+    expect(warnings[0]).toContain('Bad Name')
+    // 内容不变：再读两次不刷日志。
+    await store.loadGlobal()
+    await store.loadGlobal()
+    expect(warnings).toHaveLength(1)
+    // 内容变了（同一条警告、不同 revision）：立刻再记一次。
+    files.set(globalPolicyPath(), '{ "skills": ["b", "Bad Name"] }')
+    await store.loadGlobal()
+    expect(warnings).toHaveLength(2)
+  })
+
+  it('does not log anything when the global file is clean', async () => {
+    const { store, warnings } = makeStore({ [globalPolicyPath()]: serializeGlobalPolicy(EMPTY_POLICY) })
+    await store.loadGlobal()
+    await store.loadGlobal()
+    expect(warnings).toEqual([])
+  })
+
   it('derives revision from a sha256 of the file content', async () => {
     const { store } = makeStore({ [globalPolicyPath()]: serializeGlobalPolicy(EMPTY_POLICY) })
     const r = await store.loadGlobal()

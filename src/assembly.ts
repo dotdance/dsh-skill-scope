@@ -43,7 +43,16 @@ export interface ServiceGetter {
 export interface AssemblyContext extends ServiceGetter {
   on(event: string, listener: (...args: never[]) => unknown): () => void
   effect(callback: () => unknown): unknown
-  inject(names: readonly string[], callback: () => void): void
+  /**
+   * 回调**可以返回 disposer**，而且这条返回值是「服务 churn 不重复注册」的全部依靠：
+   * cordis 在 `_unload` 里 `_disposables.clear().map(runDisposable)`（`lib/index.js:1397`）
+   * 先调它、再由 `_reload()`（`:1373`）重跑回调；不 return 就没有收手时机，同 path 二次注册
+   * 会被宿主 `webserver` 以 `duplicate exact route` 拒绝。
+   *
+   * 类型里必须显式写出返回值：写成 `() => void` 会让 `tsc` 对「删掉 return」毫无反应
+   * （实测 `tsc --noEmit` 仍 exit 0），等于把唯一要害从类型系统里抹掉。
+   */
+  inject(names: readonly string[], callback: () => () => unknown): void
   logger: { info(message: string): void; warn(message: string): void }
 }
 
@@ -272,10 +281,54 @@ export function assemble(ctx: AssemblyContext, deps: AssembleDeps = {}): Assembl
     const fetchRegister = readFetchRegister(ctx)
     if (fetchRegister === null) {
       ctx.logger.warn(`dsh-skill-scope: connection 服务在册但没有 fetch.register，路由未注册（策略仍生效）`)
-      return
+      // 类型要求回调**必须**返回 disposer（见 `AssemblyContext.inject` 的注释）：这条
+      // fail-open 分支没有东西可释放，返回 no-op 也胜过返回 undefined —— 后者会让
+      // `tsc` 对整条契约失明。
+      return () => {}
     }
-    disposeRoutes = registerRoutes(ctx, routeDeps, fetchRegister)
+    const release = registerRoutes(ctx, routeDeps, fetchRegister)
+    /*
+     * **必须 return 这个释放函数**（cordis 会收下回调的返回值）。
+     *
+     * 归因要说准：**释放**发生在 `_setEpoch` → `_unload()`（`lib/index.js:1396-1416`：
+     * `this._disposables.clear().map(runDisposable)`），**重跑**发生在 `_reload()`
+     * （`:1373-1395`：`await Promise.resolve()` → 比对 `this._runner.epoch` → `_execute`）。
+     * 两者由 `this.inertia` 串行化，顺序是「先调旧 disposer，再跑新回调」（真 cordis
+     * + 本文件实现的探针日志：`disposer(#1) invoked` 先于 `run#2`）。
+     *
+     * 不 return 的话，`connection` 重连一次就等于同 path 二次注册，宿主 webserver 直接抛
+     * `webserver: duplicate exact route "…"`（`dsh-host-webserver/lib/index.js:375`）。
+     *
+     * 幂等包一层：`src/index.ts` 的 `ctx.effect(() => assembly.disposeRoutes)` 也会在卸载
+     * 时调它，与 cordis 的自动调用可能撞在一次卸载上。宿主对重复 dispose 是否幂等不该
+     * 成为我们的依赖（实测第二次是 no-op，但那是实现细节）。
+     *
+     * `released` **必须留在回调体内**：每次 churn 重跑都是新闭包，旧闭包的 `released` 已由
+     * `_unload` 置真。把它提到 `assemble` 作用域就只有第一次生效 —— churn 后新注册的 4 条
+     * 路由永远释放不掉（`tests/assembly.spec.ts` 的 `survives a connection churn` 守这条）。
+     */
+    let released = false
+    const dispose = async (): Promise<void> => {
+      if (released) return
+      released = true
+      await release()
+    }
+    disposeRoutes = dispose
+    return dispose
   })
 
-  return { store, states, disposeHooks: disposeHooks.stopAll, disposeRoutes, reapplyAfterSave }
+  /*
+   * `disposeRoutes` 必须是**转发函数**，不能直接返回这个 `let` 的值：
+   * `ctx.inject` 的回调在微任务里才跑（cordis `Fiber._reload()` 首句
+   * `await Promise.resolve()`），所以本函数同步 return 时它还是初始的 no-op。
+   * 交出去的是值就等于永久交出 no-op ⇒ 卸载不释放路由，重载时同 path 二次注册被宿主
+   * 拒绝，新实例一条路由都没有（面板整片 404 到重启）。转发函数在调用时才读 `let`。
+   */
+  return {
+    store,
+    states,
+    disposeHooks: disposeHooks.stopAll,
+    disposeRoutes: () => disposeRoutes(),
+    reapplyAfterSave,
+  }
 }

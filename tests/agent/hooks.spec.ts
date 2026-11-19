@@ -137,6 +137,14 @@ function makeHarness(options: {
   agentSkills?: string[]
   complete?: boolean
   toolNames?: string[]
+  /**
+   * 让 `restrict` 交出的 disposer 在被调用时抛错。
+   *
+   * 真实成因：`release()` 会同步 emit `tools/change`，第三方监听器可能炸。用它可以钉住
+   * 「`applyRound` 把 `onReleaseError` 接上了没有」——只测 `mcp.ts` 自己的可选回调
+   * 证明不了接线存在（删掉 `hooks.ts` 那三行，旧全量仍是 418/418 全绿）。
+   */
+  rejectRestrictRelease?: boolean
   /** 这些名字在清单里带官方路径（`@deepseek-ai` 作用域），见 `makeSkills`。 */
   officialPaths?: readonly string[]
 } = {}) {
@@ -220,6 +228,11 @@ function makeHarness(options: {
       restrict: (filter) => {
         restrictCalls.push(filter)
         return () => {
+          if (options.rejectRestrictRelease === true) {
+            // 先记账再抛：真实场景里底层层已被撤掉，抛的只是监听器异常。
+            for (const toolName of filter.deny) restrictReleased.push(toolName)
+            throw new Error('listener boom')
+          }
           for (const toolName of filter.deny) restrictReleased.push(toolName)
         }
       },
@@ -523,27 +536,128 @@ describe('installAgentHooks', () => {
     }
   })
 
-  it('does not register after disposal while a snapshot is blocked', async () => {
+  /*
+   * 处置早于回合开始，本回合不得做任何事。
+   *
+   * `calls`（`computeHidden` 里的 `skills.snapshot`）钉的是 `evaluate` 之后那条
+   * `isActive()`（`hooks.ts:359`）：单删它 → `calls` 变 1 → 红（实测）。
+   *
+   * 更早的两条守卫（`requestAgentApply` 的 `:389`、`drainAgent` 入口的 `:348`）在本
+   * 时序里**赶不上**：`fire('agent/created')` 同步进入链体，`evaluate` 的 `loadGlobal`
+   * 已经先跑了一次（实测 `loads === 1`），处置事件是之后才到的。所以那两条不可观测，
+   * 本用例不假装覆盖它们。
+   *
+   * 同时它守住 `agent/disposed` 的 payload 解析：宿主发 `{ agent }`，若回退成
+   * `asAgentLike(value)`，`schedule.disposed` 不置真，`calls` 会变正。
+   */
+  it('does not evaluate at all when the agent was disposed first', { timeout: 3000 }, async () => {
     const ctx = makeFakeCtx() as unknown as Context & FakeContext
-    let releaseSnapshot!: () => void
     const harness = makeHarness({
       workspace: { skills: { demo: false }, mcps: {} },
     })
+    let calls = 0
     const baseSnapshot = harness.deps.skills.snapshot
     harness.deps.skills.snapshot = async (call: { cwd?: string; scope?: unknown }) => {
-      await new Promise<void>((resolve) => {
-        releaseSnapshot = resolve
-      })
+      calls += 1
       return await baseSnapshot(call)
     }
     installAgentHooks(ctx, harness.deps)
     const created = fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })
-    await vi.waitFor(() => expect(releaseSnapshot).toBeTypeOf('function'))
-    await fire(ctx, 'agent/disposed', harness.agent)
-    releaseSnapshot()
+    await fire(ctx, 'agent/disposed', { agent: harness.agent })
     await created
+    expect(calls).toBe(0)
     expect(harness.shadowCalls).toEqual([])
+  })
+
+  /*
+   * 晚到的落地必须被撤销：`applySkillShadow` 已经 register 之后才收到 `agent/disposed`，
+   * 那层 shadow 就成了孤儿（清单里 demo 永远 `modelInvocable: false`，状态里也已没有
+   * 任何句柄能释放它）。这条覆盖 `applyRound` 里 `!isActive()` 的释放分支。
+   */
+  it('releases a shadow that lands after the agent was disposed', { timeout: 3000 }, async () => {
+    const ctx = makeFakeCtx() as unknown as Context & FakeContext
+    const harness = makeHarness({
+      workspace: { skills: { demo: false }, mcps: {} },
+    })
+    let openGate!: () => void
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve
+    })
+    let calls = 0
+    const baseSnapshot = harness.deps.skills.snapshot
+    harness.deps.skills.snapshot = async (call: { cwd?: string; scope?: unknown }) => {
+      calls += 1
+      // 第 1 次是求值；第 2 次是**注册之后**的复验，卡在这里就打开了「已落地但未提交」的窗口。
+      if (calls >= 2) await gate
+      return await baseSnapshot(call)
+    }
+    installAgentHooks(ctx, harness.deps)
+    const created = fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })
+    await vi.waitFor(() => expect(harness.shadowCalls).toEqual(['demo']))
+    await fire(ctx, 'agent/disposed', { agent: harness.agent })
+    openGate()
+    await created
+    // 晚到的那层被释放（正常路径下 released 只会因 disposed 事件增长一次）。
+    expect(harness.released).toEqual(['demo'])
+    // 不再断言 `states` 里没有 a1：`onDisposed` 无条件 delete，那条断言恒真（实测删掉
+    // `releaseOne` 后它依旧是绿的），装饰性断言会让人误以为缺陷有信号。
+  })
+
+  /*
+   * MCP 侧的晚到撤销：`restrict` 已经把底层层挂上（工具已经收窄），之后才收到
+   * `agent/disposed`。若 `applyRound` 不看 `isActive()` 就提交，句柄会连同已消失的 state
+   * 一起丢掉 —— 这层 restriction 再没有任何引用能释放它，被禁工具在整个会话里永久不可见
+   * （用户看到的是「工具列表缺东西」，日志一行没有）。
+   *
+   * 实测：单独删掉 `src/agent/hooks.ts:249-256` 那段 `if (!isActive())`，本条是唯一失败的
+   * 用例（此前该分支零覆盖，摘掉后 421 全绿）。
+   */
+  it('releases an mcp restriction that lands after the agent was disposed', { timeout: 3000 }, async () => {
+    const ctx = makeFakeCtx() as unknown as Context & FakeContext
+    const harness = makeHarness({ workspace: { skills: {}, mcps: { gbrain: false } } })
+    const baseRestrict = harness.deps.scopedTools.restrict
+    let fired = false
+    harness.deps.scopedTools = {
+      restrict: (filter) => {
+        const handle = baseRestrict(filter)
+        // 同步派发（`emitEvent` 不是 promise）：底层层此刻已经收窄完，句柄也已返回，
+        // 而本回合还没走到提交 state 的那一步 —— 正是「已落地、未提交」的窗口。
+        if (!fired) {
+          fired = true
+          emitEvent(ctx, 'agent/disposed', { agent: harness.agent })
+        }
+        return handle
+      },
+    }
+    installAgentHooks(ctx, harness.deps)
+    await fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })
+    expect(harness.restrictCalls).toEqual([{ deny: ['mcp__gbrain__search'] }])
+    expect(harness.restrictReleased).toEqual(['mcp__gbrain__search'])
     expect(harness.states.get('a1')).toBeUndefined()
+  })
+
+  /*
+   * `onReleaseError` 的**接线**：`mcp.spec` 里的三条用例都是直接传回调给
+   * `applyMcpRestriction`，证明不了 `applyRound` 把它接上了。删掉 `hooks.ts` 那三行，
+   * 旧全量 418/418 仍然全绿 —— 而后果是 release 抛错被静默吞掉、被禁工具这一轮全部
+   * 重新可见、日志零痕迹。
+   */
+  it('logs when the old mcp restriction refuses to release', async () => {
+    const ctx = makeFakeCtx() as unknown as Context & FakeContext
+    const harness = makeHarness({
+      workspace: { skills: {}, mcps: { gbrain: false } },
+      rejectRestrictRelease: true,
+    })
+    installAgentHooks(ctx, harness.deps)
+    await fire(ctx, 'agent/created', { agent: harness.agent, source: 'session' })
+    expect(harness.restrictCalls).toEqual([{ deny: ['mcp__gbrain__search'] }])
+
+    // 打开 gbrain ⇒ 隐藏集变空 ⇒ 走「撤掉旧层」的那条释放路径（旧句柄会抛）。
+    harness.state.workspace = { skills: {}, mcps: { gbrain: true } }
+    await fire(ctx, 'tools/change', {})
+    // 认「撤销」而不是「释放」：后者与 `releaseOne` 的 `释放 ${label} 失败` 逐字相同，
+    // 同一轮里若两处都可能触发，删掉 `onReleaseError` 接线也会被另一条日志掩盖（实测）。
+    expect(harness.warn).toHaveBeenCalledWith(expect.stringContaining('撤销 mcp restriction 失败'))
   })
 
   it('retries one incomplete snapshot and recovers after a later notification', async () => {
@@ -594,7 +708,7 @@ describe('installAgentHooks', () => {
     expect(harness.shadowCalls.flat()).toEqual(['demo'])
     expect(harness.restrictCalls).toEqual([{ deny: ['mcp__gbrain__search'] }])
 
-    await fire(ctx, 'agent/disposed', harness.agent)
+    await fire(ctx, 'agent/disposed', { agent: harness.agent })
     // 释放恰好一次（创建时不释放，见上一个用例），且状态被摘除。
     expect(harness.released).toEqual(['demo'])
     expect(harness.restrictReleased).toEqual(['mcp__gbrain__search'])

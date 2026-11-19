@@ -208,6 +208,17 @@ async function applyRound(
     })
     if (!isActive()) {
       releaseOne(deps, 'skill shadow', result.release)
+      // 旧 shadow 在 `applySkillShadow` 内部已被释放，`state` 若继续留着「旧 key +
+      // 死句柄」，agent 被复用时 `previousSkillKey === skillKey` 会判定「没变」而
+      // 跳过重注册 —— 掩码永远不落地。这里把 state 归零，下一轮必然重算。
+      //
+      // **这两行目前没有用例守着**（实测删掉后 hooks.spec 仍 18/18 全绿）：能让
+      // `isActive()` 变 false 的只有 `agent/disposed`（它接着 `states.delete`，state
+      // 随即消失）与 `stopAll()`（此后不再有回合）。留着是因为防线在
+      // `AgentStates` 那一侧：`ensure` 按 id 复用旧对象，一旦将来释放改成「保留对象」，
+      // 这里就是唯一的归零点。
+      state.skillKey = ''
+      state.skillDispose = null
       return
     }
     state.skillDispose = result.release
@@ -230,10 +241,19 @@ async function applyRound(
         key: mcpKey,
         previous: mcpRestrictionOf(state),
         agent: scope,
+        onReleaseError: (error) => {
+          // 文案必须与 `releaseOne` 的 `释放 ${label} 失败` **不同**：两处都在同一轮里可能
+          // 触发，用同一句话会让「onReleaseError 没接线」这类缺陷被另一条日志掩盖。
+          deps.logger.warn(`dsh-skill-scope: 撤销 mcp restriction 失败：${String(error)}`)
+        },
       }),
     )
     if (!isActive()) {
       releaseOne(deps, 'mcp restriction', next?.release ?? null)
+      // 同上：`applyMcpRestriction` 已经释放了旧句柄（先挂新层、后撤旧层），state 不能
+      // 继续指着死句柄。`next === null`（隐藏集变空）时旧句柄同样已释放，一并归零。
+      state.mcpKey = ''
+      state.mcpDispose = null
       return
     }
     state.mcpKey = mcpKey
@@ -410,7 +430,11 @@ export function installAgentHooks(
   }
 
   const onDisposed = (value: unknown): void => {
-    const agent = asAgentLike(value)
+    // 宿主发的是 `{ agent }`（`dsh-agent` 的 `emitDisposed`），裸 agent 只出现在旧测试里。
+    // 直接 `asAgentLike(value)` 会因为 `value.session` 不存在而恒为 null ⇒ 下面整段释放
+    // 逻辑变成死代码（状态 Map 只增不减、每次清单变化都对历史 agent 空跑一遍）。
+    const payload = typeof value === 'object' && value !== null ? (value as { agent?: unknown }) : null
+    const agent = asAgentLike(payload?.agent ?? value)
     if (agent === null) return
     const applyState = applyStates.get(agent.id)
     if (applyState !== undefined) {

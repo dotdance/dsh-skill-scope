@@ -229,6 +229,31 @@ describe('handleGlobal', () => {
     expect(warnings.some((message) => message.includes('loader server'))).toBe(true)
   })
 
+  /*
+   * 全局读取 warning 的日志**已下沉到 `PolicyStore.loadGlobal`**
+   * （见 tests/policy/store.spec.ts 的 `reports the global parse warning once per revision`）。
+   * 放在路由层只能覆盖「用户打开了面板」，而执行路径 `agent/hooks` 的 `evaluate` 才是
+   * 真正需要它的地方；这里只保留一条断言：路由层**不再**重复记同一件事（否则每次打开
+   * 面板都会多一条）。
+   */
+  it('does not double-log the global read warning', async () => {
+    const { deps, warnings } = makeDeps()
+    const drifting: RouteDeps = {
+      ...deps,
+      store: {
+        ...deps.store,
+        loadGlobal: async () => ({
+          policy: EMPTY_POLICY,
+          revision: 'rev',
+          exists: true,
+          warning: '策略中有内容不合法，已丢弃不合法的名字（不合法 skill："Bad Name"）',
+        }),
+      } as unknown as PolicyStore,
+    }
+    expect(await handleGlobal({}, drifting)).toMatchObject({ ok: true })
+    expect(warnings.some((message) => message.includes('Bad Name'))).toBe(false)
+  })
+
   it('never lets an exception escape: a failing store becomes internal', async () => {
     const { deps } = makeDeps()
     const broken: RouteDeps = {

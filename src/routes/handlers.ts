@@ -219,6 +219,13 @@ function saveFailure(
  */
 async function readGlobalValue(deps: RouteDeps): Promise<GlobalValue> {
   const loaded = await deps.store.loadGlobal()
+  /*
+   * 全局文件的读取期 warning **不在这里记**：`loadGlobal` 自己就记（`PolicyStore.reportGlobalWarning`，
+   * 按 `revision + warning` 去重）。放在这里只能覆盖「用户打开了面板」这一条路径，
+   * 而真正需要它的执行路径是 `agent/hooks` 的 `evaluate`——那里也会读全局文件。
+   * 在唯一的数据源处记，三个消费方（本函数、`buildWorkspaceView`、`hooks.evaluate`）
+   * 一次覆盖，且内容不变时不会重复刷日志。
+   */
   const skills = await readGlobalSkills(deps.skills, {
     showOfficialSkills: loaded.policy.showOfficialSkills,
   })

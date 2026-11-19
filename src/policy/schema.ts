@@ -50,11 +50,24 @@ export interface LayerPolicy {
  * **唯一会被求值器采纳的模式**，用它当缺省可以避免「存进去的 mode 与读回来
  * 归一后的 mode 不一致」这种需要额外解释的状态。
  */
-export const EMPTY_POLICY: LayerPolicy = {
+export const EMPTY_POLICY: LayerPolicy = deepFreeze({
   mode: 'blacklist',
   skills: [],
   mcps: [],
   showOfficialSkills: false,
+})
+
+/**
+ * 冻结缺省策略（含里面的数组）。
+ *
+ * 它是**被所有调用方共享**的常量：`tests/agent/hooks.spec.ts` 的 `makeHarness` 直接把它
+ * 当作 `global`，生产侧也可能把它当缺省层返回。一次原地 `push` 就会让缺省策略永久带上
+ * 别人的名字，而且跨用例、跨会话串味（单跑不复现、全量偶发）。冻结后这种写入会直接抛。
+ */
+function deepFreeze<T>(value: T): T {
+  if (value === null || typeof value !== 'object') return value
+  for (const inner of Object.values(value)) deepFreeze(inner)
+  return Object.freeze(value)
 }
 
 /** Skill 名形状（与 `dsh-skill` 的命名一致，见设计 3.1）。 */
@@ -78,6 +91,81 @@ export const MAX_NAMES = 512
 const SORTED_UNIQUE = (names: readonly string[]): string[] => [...new Set(names)].sort()
 
 /**
+ * 逐元素挑出合法名字，并把被丢弃的元素**原样**带出来（`previewValue` 与去重交给调用方）。
+ *
+ * **不能退回「正则挂在 zod 数组元素上」的写法**：`z.array(z.string().regex(…)).catch([])`
+ * 的 `.catch` 是整数组级别的，一个坏名字让整份名单失效（见 lenientPolicySchema 的注释）。
+ * 这里改成逐个判，最坏只丢那一条，且丢弃项可被用户看见。
+ *
+ * `pattern` 必须**不带 `g` 标志**：`RegExp.prototype.test` 对带 `g` 的正则会推进
+ * `lastIndex`，同一个正则复用会漏判隔项（这里用的是模块级共享正则）。
+ */
+function pickNames(raw: readonly unknown[], pattern: RegExp): { names: string[]; dropped: unknown[] } {
+  const names: string[] = []
+  const dropped: unknown[] = []
+  for (const item of raw) {
+    if (typeof item === 'string' && pattern.test(item)) names.push(item)
+    else dropped.push(item)
+  }
+  return { names, dropped }
+}
+
+/**
+ * 丢弃项去重后再渲染：按**原值**去重（`Set` 对原始值按值、对对象按引用），
+ * 先渲染再去重会把 `1` 与 `"1"` 这类不同原值合并成一条，条数与实际不符。
+ */
+function previewDropped(items: readonly unknown[]): string[] {
+  return [...new Set(items)].map(previewValue)
+}
+
+/** 被丢弃条目的展示上限：单条超过这个长度就截断（用户输入长度不可控）。 */
+const PREVIEW_MAX = 40
+
+/**
+ * 把被丢弃的元素写成一短段可读文本。**永不抛错**。
+ *
+ * `normalizePolicy` 的契约是「永不抛错」，而 `JSON.stringify` 遇到 `BigInt` 与循环引用
+ * 会抛 `TypeError`（实测 `{skills:[1n]}` → `TypeError: Do not know how to serialize a BigInt`），
+ * 所以这里必须兜住；字符串走 `JSON.stringify` 是为了让空串与前导空格在日志里可见
+ * （`""` / `" good"` 一眼可辨）。
+ */
+function previewValue(item: unknown): string {
+  // `JSON.stringify(NaN)` / `JSON.stringify(Infinity)` 都是 `"null"`，两个不同的坏值
+  // 会渲染成同一条 `null`，日志里分不清用户写了什么。数字非有限值直接按字面量写。
+  if (typeof item === 'number' && !Number.isFinite(item)) return String(item)
+  let text: string
+  if (typeof item === 'string') {
+    // 先按码点截断**原串**再 stringify：转义符与代理对都在合法边界上产生，
+    // 反序（先 stringify 再切）会把 `\uD83D\uDE00` 切成孤立代理，日志里是乱码。
+    text = JSON.stringify(clamp(item))
+  } else {
+    try {
+      text = JSON.stringify(item) ?? `[${typeof item}]`
+    } catch {
+      text = `[${typeof item}]`
+    }
+  }
+  return clamp(text)
+}
+
+/** 按**码点**（不是 UTF-16 码元）截断，超长加省略号。 */
+function clamp(text: string): string {
+  if (text.length <= PREVIEW_MAX) return text
+  return `${Array.from(text).slice(0, PREVIEW_MAX).join('')}…`
+}
+
+/**
+ * 该字段是否**整份**被 zod 丢掉——与「只丢了几个元素」区分开。
+ *
+ * 只剩「非数组（类型写错）」一种：数量超限**不再**由 zod 判（见 reconstruct 后的注释），
+ * 因为超限必须在元素过滤之后、按**过滤后的有效名字数**判，否则
+ * 「512 条合法 + 1 条 junk」会先因 513 条超限被整份 `.catch()` 掉。
+ */
+function listVoided(raw: unknown): boolean {
+  return raw !== undefined && !Array.isArray(raw)
+}
+
+/**
  * 宽松的读取 schema：任何一项不合法都退回该层的缺省，由调用方补一条 warning。
  * `mode` 可选（缺失时取调用方给的层缺省）；名单元素必须过正则、数量不得超限。
  *
@@ -96,16 +184,19 @@ const lenientPolicySchema = (fallbackMode: PolicyMode) =>
       .transform((): PolicyMode => 'blacklist')
       .catch((): PolicyMode => fallbackMode)
       .default((): PolicyMode => fallbackMode),
-    skills: z
-      .array(z.string().regex(SKILL_NAME_RE))
-      .max(MAX_NAMES)
-      .catch([])
-      .default([]),
-    mcps: z
-      .array(z.string().regex(MCP_NAME_RE))
-      .max(MAX_NAMES)
-      .catch([])
-      .default([]),
+    /*
+     * 名单**不在这里按元素校验**：`.catch()` 挂在**数组**上，任一元素不过正则就让整份
+     * 名单变 `[]`（实测 `{"skills":["good-one","Bad Name"]}` → `skills: []`），一个写错的
+     * 名字把 512 条有效关闭项一起失效，而面板与日志都看不到。改为收 `unknown[]`，
+     * 由 `normalizePolicy` 逐元素过滤并点名被丢掉的元素（见 `pickNames`）。
+     *
+     * 数量上限 `.max(MAX_NAMES)` **也移走**了，理由同一条缺陷的边界形态：
+     * `.max` 在过滤**之前**跑，「512 条合法 + 1 条 junk = 513 条」会先被判超限、
+     * 由整份 `.catch()` 清空，512 条有效关闭项照样失效（实测 `skills.length === 0`）。
+     * 现在数量在 `normalizePolicy` 里按**过滤后的有效名字**判，junk 不再占额度。
+     */
+    skills: z.array(z.unknown()).catch([]).default([]),
+    mcps: z.array(z.unknown()).catch([]).default([]),
     // 展示开关与两份名单同一口径：坏值 / 缺键都退回缺省 `false`（不展示），
     // 由 `normalizePolicy` 记 warning 指出被回退的那个键。
     showOfficialSkills: z.boolean().catch(false).default(false),
@@ -124,13 +215,28 @@ export function normalizePolicy(
     return { policy: EMPTY_POLICY, warning: `策略内容不合法，已回退为空策略：${parsed.error.message}` }
   }
   const source = raw as Record<string, unknown> | null | undefined
+  const skillsScan = pickNames(parsed.data.skills, SKILL_NAME_RE)
+  const mcpsScan = pickNames(parsed.data.mcps, MCP_NAME_RE)
+  const droppedSkills = previewDropped(skillsScan.dropped)
+  const droppedMcps = previewDropped(mcpsScan.dropped)
+  // 上限按**去重后的有效名字数**判（重复项不占额度），超出则整份忽略：
+  // 静默截断会让用户以为「第 513 条之后的名也关着」。
+  const skills = SORTED_UNIQUE(skillsScan.names)
+  const mcps = SORTED_UNIQUE(mcpsScan.names)
+  const skillsOverflow = skills.length > MAX_NAMES
+  const mcpsOverflow = mcps.length > MAX_NAMES
   const policy: LayerPolicy = {
     mode: parsed.data.mode,
-    skills: SORTED_UNIQUE(parsed.data.skills),
-    mcps: SORTED_UNIQUE(parsed.data.mcps),
+    skills: skillsOverflow ? [] : skills,
+    mcps: mcpsOverflow ? [] : mcps,
     showOfficialSkills: parsed.data.showOfficialSkills,
   }
-  // 逐字段比对，指出被静默回退的最小集合，便于用户定位手写错误的键。
+  // 逐字段比对，只指出**整份被回退**的字段，便于用户定位手写错误的键。
+  //
+  // 名单字段**不按 `sameSet` 判漂移**：`sameSet` 在「有元素被丢弃」与「只有重复项」
+  // 两种情况下都返回 `false`，若据此写成「已忽略字段：skills」，而实际只丢了几个名字
+  // （或什么都没丢），用户会以为整份名单失效而去重写策略。整份失效只有两种情形，
+  // 由 `listVoided` 判定；元素级丢弃单独措辞。
   //
   // `mode` 单独处理：它**不并入 `drifted`**。两条进入 `migratedMode` 的路径都不是
   // 「用户写坏了」：`default` 在枚举内被 `.transform()` 归一，`whitelist` 走
@@ -138,19 +244,37 @@ export function normalizePolicy(
   // 若并入 `drifted`，警告会写成 agnostic 的「已忽略字段：mode」，让用户以为自己的
   // 写法有语法错，而实际上是插件改了语义。
   const drifted: string[] = []
-  if (source?.skills !== undefined && !sameSet(source.skills, policy.skills)) drifted.push('skills')
-  if (source?.mcps !== undefined && !sameSet(source.mcps, policy.mcps)) drifted.push('mcps')
+  if (listVoided(source?.skills)) drifted.push('skills')
+  if (listVoided(source?.mcps)) drifted.push('mcps')
   // 展示开关只有「是 / 不是布尔」两种坏法；后者会被 `.catch()` 静默退回 `false`，
   // 必须点名，否则用户看到「官方 skill 又不见了」却找不到原因。
   if (source?.showOfficialSkills !== undefined && source.showOfficialSkills !== policy.showOfficialSkills) {
     drifted.push('showOfficialSkills')
   }
   const migratedMode = source?.mode !== undefined && source.mode !== policy.mode
-  if (drifted.length > 0) {
+  // 被逐个丢弃的名字必须点名：否则「少关了一条 skill」在面板上完全看不出来。
+  // 按域分开、去重、单条截断：混成一句时用户不知道哪条属于哪份名单。
+  const dropSegment = (label: string, names: readonly string[]): string =>
+    names.length === 0
+      ? ''
+      : `${label}：${names.slice(0, 5).join(', ')}${names.length > 5 ? ` 等 ${names.length} 项` : ''}`
+  const droppedTotal = droppedSkills.length + droppedMcps.length
+  const dropParts = [dropSegment('不合法 skill', droppedSkills), dropSegment('不合法 mcp', droppedMcps)].filter(
+    (part) => part !== '',
+  )
+  const droppedText = dropParts.length === 0 ? '' : `（${dropParts.join('；')}）`
+  // 整份失效（字段类型写错）与元素级丢弃必须**并列成两句**，不能嵌套在同一对括号里：
+  // `已忽略字段：mcps（不合法 skill："Bad Name"）` 读起来像「mcps 里有这个 skill」。
+  const clauses: string[] = []
+  if (drifted.length > 0) clauses.push(`已忽略字段：${drifted.join(', ')}`)
+  if (droppedTotal > 0) clauses.push('已丢弃不合法的名字')
+  if (skillsOverflow) clauses.push(`skills 有效名字 ${skills.length} 条超过上限 ${MAX_NAMES}，已整份忽略`)
+  if (mcpsOverflow) clauses.push(`mcps 有效名字 ${mcps.length} 条超过上限 ${MAX_NAMES}，已整份忽略`)
+  if (clauses.length > 0) {
     const migrated = migratedMode
       ? `；mode 由「${String(source?.mode)}」归一到「${policy.mode}」（白名单已废弃，名单语义统一为黑名单）`
       : ''
-    return { policy, warning: `策略中有内容不合法，已忽略字段：${drifted.join(', ')}${migrated}` }
+    return { policy, warning: `策略中有内容不合法，${clauses.join('；')}${droppedText}${migrated}` }
   }
   if (migratedMode) {
     return {
@@ -159,13 +283,6 @@ export function normalizePolicy(
     }
   }
   return { policy }
-}
-
-function sameSet(raw: unknown, normalized: readonly string[]): boolean {
-  if (!Array.isArray(raw)) return false
-  const asStrings = raw.filter((item): item is string => typeof item === 'string')
-  if (asStrings.length !== raw.length) return false
-  return asStrings.length === normalized.length && SORTED_UNIQUE(asStrings).join('\n') === normalized.join('\n')
 }
 
 /**
