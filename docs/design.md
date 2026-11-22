@@ -1,8 +1,8 @@
 # dsh-skill-scope 设计文档
 
-- 文档版本：v2.1
-- 日期：2026-10-12（v2.1 修订于 2026-10-22）
-- 基准：DSH `0.2.2-alpha.2`（`@deepseek-ai/cordis` `4.0.6-alpha.1`）；声明兼容范围以 `package.json` 为准（当前为 `>=0.2.2-0 <0.2.3-0`）。
+- 文档版本：v2.3
+- 日期：2026-10-12（v2.3 修订于 2026-11-22）
+- 基准：DSH `0.2.2-rc.5`（`@deepseek-ai/cordis` `4.0.6-alpha.1`）；声明兼容范围以 `package.json` 为准（当前为 `>=0.2.2-rc.1 <0.4.0-0`）。
 - 目标仓库：本仓库（相对路径 `.`）
 - 状态：设计方向已与用户确认；本文件是实施计划的输入。实现已完成，当前代码以本文件的机制与不变量为准。
 - 修订历史见 13 节。本节只记录**当前**口径，不再复述各版本的编辑过程。
@@ -499,7 +499,7 @@ isOpen(name) = 工程层表里有 name ? 表里的值 : 全局是否启用(name)
 | 包名 | `dsh-skill-scope`（与仓库同名） |
 | 许可 | MIT |
 | 模块形态 | `type: "module"`，`exports`: `.` → `lib/index.js`，`./client` → `lib/client.js` |
-| engines | `node: "^22.19.0 || >=24.0.0"`；`dsh: "^0.2.0-rc.2 || ^0.2.1-0"`（下限 `0.2.0-rc.2`、封顶 `<0.3.0`；v1.9 的裸 `>=` 已在 v2.1 纠正，见 13.11） |
+| engines | `node: "^22.19.0 || >=24.0.0"`；`dsh: ">=0.2.2-rc.1 <0.4.0-0"`（下限 `0.2.2-rc.1`、上界 `<0.4.0-0`；v2.1 为 `<0.2.3-0`，v2.2 曾去掉上界，v2.3 按用户指令定为 `<0.4.0-0`，见 13.12 / 13.13） |
 | 兼容性 | **`engines.dsh`（本版本起采用）** 与 **`peerDependencies` 里的 `@deepseek-ai/dsh-*` 区间**都是被消费的机制，由 `dsh-app-boot` 的 `evaluatePluginCompatibility` 判定。**二者不是并存关系：一旦声明 `engines.dsh`，它单独决定，`peerDependencies` 里的 dsh 项被完全忽略**（`dsh-app-boot/README.md:52`：「When the manifest declares `engines.dsh`, that range alone decides and `peerDependencies` are ignored.」）。`peerDependencies` 里**非 dsh 的项**（`@deepseek-ai/cordis`、`react`）不受影响，仍照常生效。**该机制自 `0.2.1-alpha.4` 起存在**：更早的 `dsh-app-boot` 里没有读 `engines` 的代码，那些宿主只按 `peerDependencies` 判定，所以两条声明必须用**同一区间**，否则会在旧宿主上被判不兼容（见 13.11）。不存在的 `dsh.engines.dsh` / `dsh.compatibility.dshReleases` 仍不采用。 |
 | bundle | `dsh.bundle.patch` → `./cordis.patch.yml`（`insert` 一行 `dsh-skill-scope`） |
 | client | `dsh.client = { platform: 'web', inject: [...包名图...], external: ['@deepseek-ai/dsh-client-ui-slots', '@deepseek-ai/dsh-client-ui-primitives', '@deepseek-ai/dsh-client-runtime/client'] }`（字段语义见 `@deepseek-ai/dsh-package-manifest/lib/types/types.d.ts:75-92`：`inject` 只是信息性包名依赖，**不是** cordis 服务注入；`external` 是「client baseline 之外的精确模块请求」，含 `<pkg>/client` 这类子路径，未声明即运行期失败） |
@@ -1184,3 +1184,106 @@ md5 相同（`4814857a…`）；`dsh-home-paths` 两版有差异，但差异只�
   未声明它）在 rc.2 的 shell 上能否装配，均未验证。真失败时用户可 `dsh plugin allow-version` 豁免，
   或留在 `0.2.1.x`。
 - `cordis` peer 未改（`^4.0.5-alpha.1`）：`4.0.4` 与 `4.0.5-alpha.1` 的 `lib` 逐字节相同，收窄或放宽都无收益。
+
+---
+
+### 13.12 v2.2（2026-11-22：去掉上界，`engines.dsh` 改为 `>=0.2.2-rc.1`）
+
+> 上界已在 v2.3 恢复为 `<0.4.0-0`（见 13.13）；本节保留 v2.2 当时的取舍与验证记录。
+
+**背景**：用户要求「dsh 版本支持改成 `>=0.2.2-rc.1`，不要限制 `<0.2.3-0`」。本机运行宿主为 DSH
+`0.2.3-alpha.2`，而 v2.1 的封顶区间把它判为不兼容，插件在 preflight 阶段被禁用。
+
+**一、改动**
+
+`package.json` 的 8 处声明统一由 `>=0.2.2-rc.1 <0.2.3-0` 改为 `>=0.2.2-rc.1`（`engines.dsh`、2 个
+`dependencies`、5 个 `@deepseek-ai/dsh-*` peer）。`dependencies` 一并去掉上界，是为了避免新宿主上
+同时装出第二份 dsh 包：依赖区间若封顶，`pnpm` 在 `0.2.3+` 上会另解析一份 `0.2.2.x`。
+
+**二、语义差异（两个消费者，沿用 13.11 的结论）**
+
+| 消费者 | 匹配方式 | `0.2.2-rc.1` | `0.2.3-alpha.2` | `0.3.0-alpha.1` | `1.0.0` |
+| --- | --- | --- | --- | --- | --- |
+| DSH `evaluatePluginCompatibility` | `semver.satisfies(…, { includePrerelease: true })` | ok | ok | ok | ok |
+| npm / pnpm 默认模式 | 预发布只在同三元组内匹配 | ok | NO | NO | ok |
+
+即：**宿主判定按第一行**，`0.2.3-alpha.2` 起全部放行；**包管理器解析按第二行**，预发布宿主上
+`pnpm` 仍可能给出 unmet peer 警告，实际解析到 `0.2.2-rc.5`（`0.2.2` 三元组内最高的预发布）。
+
+**三、验证**（本机 DSH `0.2.3-alpha.2`，`dsh-app-boot/lib/index.js:8020` 的
+`evaluatePluginCompatibility` 直跑本 manifest）
+
+- `0.2.1` / `0.2.2-alpha.2` REJECTED；`0.2.2-rc.1`、`0.2.2-rc.5`、`0.2.3-alpha.2`、`0.2.3`、`0.2.4`、
+  `0.3.0-alpha.1`、`0.3.0`、`1.0.0` 全部 ACCEPTED。
+- `pnpm install --lockfile-only` 后 `pnpm install --frozen-lockfile` 通过；开发树 7 个 dsh 包统一升到
+  `0.2.2-rc.5`（原为 `0.2.2-alpha.2`，不满足新下限）；`pnpm peers check` → `No peer dependency issues found`。
+- `pnpm run typecheck` / `pnpm run build` / `pnpm run test`（22 个文件、424 个测试）全过。
+- **装配实跑**（隔离 `DSH_HOME`，同一 `0.2.3-alpha.2` CLI）：`dsh plugin add` 未报不兼容；启动 web
+  模板 profile 后，宿主半 `POST /api/skill-scope/global` 返回 `200 {ok:true}`（44 条 skill、mode
+  `blacklist`），`/api/skill-scope/workspace` 返回「需要 sessionId」的错误信封（证明四条路由已注册）；
+  shell 启动载荷里出现 `@dotdance/dsh-skill-scope` 的客户端条目
+  （`plugins/??@dotdance/dsh-skill-scope/client.js&rev=…`，含 inject 列表），该 bundle 取回 `200`、
+  77 KB、含 `__ModuleLoader__.load`。此轮宿主为 `0.2.3-alpha.2`，插件依赖取自仓库 `0.2.2-rc.5`，
+  即**混版**场景可用。
+
+**四、残余风险**
+
+- **上界没了 ⇒ `1.0.0` 也判兼容**。13.11 把这一条当作缺陷并据此封顶；v2.2 按用户指令接受该风险。
+  若新大版本改动 `tools.restrict` 语义，插件会「照常加载但限制未生效」，属静默失效。
+- **装配只在 link 形态验过**：隔离 profile 里插件以 `link:` 指向仓库，依赖走仓库的 `0.2.2-rc.5`。
+  发布包（tarball）经 registry 安装的路径未跑；已发布的 `0.4.1` 仍带旧上限，需要在下次发版才会带上
+  这次放宽。
+- 面板内的交互（开关、工作区弹层）未在 0.2.3-alpha.2 上逐个点击验证；已验的是服务端四条路由与
+  客户端 bundle 的注册。
+- `@deepseek-ai/cordis` peer 仍为 `4.0.6-alpha.1 || 4.1.0`，未随 `0.2.3` 系列放宽。
+
+---
+
+### 13.13 v2.3（2026-11-22：恢复上界，`engines.dsh` 定为 `>=0.2.2-rc.1 <0.4.0-0`）
+
+**背景**：v2.2 去掉上界后区间为 `>=0.2.2-rc.1`，`1.0.0` 也判兼容。用户要求「加上上限，指定为 `<0.4.0-0`」。
+同一轮核对了本机 21 个已装插件的口径：8 个声明 `engines.dsh` 的插件里，6 个封在次版本线
+（`<0.3.0-0` 四个、`<0.3.0` 一个、`<0.4.0-0` 一个），`dsh-context` 用
+`>=0.2.0-rc.2 || >=0.2.1-rc.2 || >=0.2.2-rc.1`（数学上等价于 `>=0.2.0-rc.2`，无上界），本仓库 v2.2 无上界。
+即：封在次版本线是生态主流，`<0.4.0-0` 与 `dsh-free-search` 取的是同一宽度。
+
+**一、改动**
+
+`package.json` 的 8 处（`engines.dsh`、2 个 `dependencies`、5 个 `@deepseek-ai/dsh-*` peer）统一由
+`>=0.2.2-rc.1` 改为 `>=0.2.2-rc.1 <0.4.0-0`；`pnpm-lock.yaml` 的 7 个 importer specifier 同步更新，
+解析版本不变（仍 `0.2.2-rc.5`）。`dependencies` 与 peer 取**同一区间**，理由同 13.12：区间不一致会在新宿主
+上解析出第二份 dsh 包。
+
+**二、边界语义**
+
+上界写成 `<0.4.0-0` 而不是 `<0.4.0`：`-0` 是最小的预发布，`<0.4.0-0` 把 `0.4.0` 的 alpha 也一起排除；
+写成 `<0.4.0` 时，在 `includePrerelease: true` 下 `0.4.0-alpha.x` 会被放进来——那恰是要拦的跨线预发布。
+
+| 宿主版本 | DSH（`includePrerelease: true`） | npm/pnpm 默认模式 |
+| --- | --- | --- |
+| `0.2.2-alpha.2` | NO | NO |
+| `0.2.2-rc.1` / `0.2.2-rc.5` | ok | ok |
+| `0.2.3-alpha.1` / `0.2.3-alpha.2` | ok | NO |
+| `0.2.3` / `0.2.4` | ok | ok |
+| `0.3.0-alpha.1` | ok | NO |
+| `0.3.0` / `0.3.9` | ok | ok |
+| `0.4.0-alpha.1` / `0.4.0` / `1.0.0` | NO | NO |
+
+**三、验证**
+
+- 宿主 `0.2.3-alpha.2` 的真实评估器（`dsh-app-boot/lib/index.js` 的 `evaluatePluginCompatibility`）
+  对本 manifest 判 ACCEPTED；上表逐版本结果由宿主自带 `semver` 实算。
+- `pnpm install --frozen-lockfile` 通过；`pnpm run check`（typecheck + build + test）全过。
+- 与本机 21 个已装插件同口径：它们在 `0.2.3-alpha.2` 上均未被拦，本插件改前改后结论一致，
+  差异只在 `0.4.0` 之后。
+
+**四、残余风险**
+
+- **`0.4.0` 系列全线被挡**：宿主一进 `0.4.0-alpha`，插件在 preflight 阶段被禁用，必须跟版放宽上界。
+  这是封顶的固有代价，也是 13.11 与本节共同接受的取舍。
+- **区间保证「不拦」，不保证语义不变**：`0.3.x` 是否改动 `tools.restrict` 等契约仍需逐版核对；
+  真正的行为保障仍是 13 节记录的接口与测试，不是 semver 区间。
+- **`@deepseek-ai/cordis` peer 仍为 `4.0.6-alpha.1 || 4.1.0`**：本机宿主 `0.2.3-alpha.2` 实装 `4.2.0-alpha.1`，
+  且开发树装的是 `4.0.6-alpha.1`。该 peer 不参与 DSH 判定（`evaluatePluginCompatibility` 只看
+  `@deepseek-ai/dsh*`），属声明漂移；开发树上 `pnpm peers check` 会报 7 个 `0.2.2-rc.5` 包要求 `~4.1.0`。
+  待下一轮 cordis 基线核对时统一处理。
